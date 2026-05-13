@@ -138,14 +138,14 @@ describe("Gateway.handlePiEvent", () => {
     expect(edits).toEqual(["hi"]);
   });
 
-  it("streams thinking_delta through relay with blockquote", async () => {
-    const edits: { text: string; entities?: unknown }[] = [];
+  it("streams thinking_delta through relay with blockquote prefix", async () => {
+    const edits: { text: string; parse_mode?: unknown }[] = [];
     const gateway = new Gateway({
       allowedUserId: 1,
       api: {
         sendMessage: async () => ({ message_id: 1 }),
         editMessageText: async (_c, _m, text, other) => {
-          edits.push({ text, entities: other?.entities });
+          edits.push({ text, parse_mode: other?.parse_mode });
         },
       },
     });
@@ -160,10 +160,8 @@ describe("Gateway.handlePiEvent", () => {
     await gateway.currentRelay!.onDone();
 
     expect(edits.length).toBe(1);
-    expect(edits[0]!.text).toBe("hmm...");
-    const entities = edits[0]!.entities as Array<{ type: string }>;
-    expect(entities?.length).toBe(1);
-    expect(entities?.[0]!.type).toBe("blockquote");
+    expect(edits[0]!.text).toBe("> hmm\\.\\.\\.\n");
+    expect(edits[0]!.parse_mode).toBe("MarkdownV2");
   });
 
   it("clears state on agent_end and processes queue", async () => {

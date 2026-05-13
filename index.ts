@@ -131,8 +131,8 @@ export class Gateway {
     const messageId = placeholder.message_id;
 
     this.currentRelay = createRelay({
-      edit: (buf, entities) =>
-        api.editMessageText(chatId, messageId, buf, entities ? { entities } : {}).catch((err: Error) =>
+      edit: (buf) =>
+        api.editMessageText(chatId, messageId, buf, { parse_mode: "MarkdownV2" }).catch((err: Error) =>
           console.error(`[telegram] edit failed: ${err.message}`),
         ),
       log: (msg) => dbg(1, msg),

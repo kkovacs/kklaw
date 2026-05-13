@@ -9,14 +9,14 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (~40 lines, debounced streaming), `pi-client.ts` (~70 lines, subprocess + JSONL). Extracted for testability.
+Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (~80 lines, debounced streaming + formatting), `pi-client.ts` (~70 lines, subprocess + JSONL). Extracted for testability.
 
 ### Pipeline
 
 1. Telegram user sends a text message
 2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`
 3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi
-4. pi streams `message_update.text_delta` events → accumulated buffer → `editMessageText` debounced at 600ms
+4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `editMessageText` with `parse_mode: "MarkdownV2"` debounced at 600ms
 5. On `agent_end` → final edit, clear state, process next queued message
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
 
@@ -26,6 +26,8 @@ Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (
 - **Testable core**: `Gateway` class accepts `TelegramApi` and `PiClient` as injectable deps. Tests use mock APIs, no real Telegram or pi needed.
 - **JSONL framer is custom**: Node's `readline` is incompatible (splits on `U+2028`/`U+2029` which are valid in JSON strings). Custom `\n`-only splitter with optional `\r` strip.
 - **Debounced streaming**: editing Telegram messages per-character would hit rate limits. Buffer accumulates deltas, `editMessageText` fires every 600ms, final edit on `agent_end`.
+- **Thinking via blockquote**: `thinking_delta` events are streamed alongside `text_delta`. The relay interleaves segments, wrapping thinking content in `> ` prefix (MarkdownV2 blockquote) with special characters escaped.
+- **MarkdownV2 parse_mode**: the entire message is sent with `parse_mode: "MarkdownV2"`. Both text and thinking segments are escaped to prevent parse errors — all reserved chars (`_ * [ ] ( ) ~ ` > # + - = | { } . ! \`) are escaped. Thinking content additionally gets `> ` blockquote prefix per line. Pi's `**bold**` etc. render as literal characters (not formatted).
 - **Sequential processing**: pi handles one prompt at a time. Incoming messages while busy are queued FIFO.
 - **`--no-session`**: pi runs ephemeral (no session persistence across messages). Future: remove flag for conversation memory.
 - **Pi restart on crash**: `exit` handler spawns a new pi process after 1s delay.
@@ -71,7 +73,8 @@ bun test           # run tests
 - `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `Relay`, sends `{"type":"prompt",...}` to pi.
 - `handlePiEvent(event)` — routes pi events:
   - `response` — log success/error
-  - `message_update` with `text_delta` → `relay.onDelta(delta)`
+  - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
+  - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
   - `agent_end` → `relay.onDone()`, then `processQueue()`
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
@@ -82,9 +85,9 @@ bun test           # run tests
 
 **`createRelay({ edit, debounceMs?, log? })` → `{ onDelta, onDone }`**
 
-Pure function. Holds `replyBuffer` and `editTimer` in closure.
-- `onDelta(text)` — appends to buffer, schedules debounced `edit()` call (default 600ms)
-- `onDone()` — cancels timer, flushes final `edit()`, clears buffer
+Pure function. Holds `segments`, `currentKind`, `currentText` and `editTimer` in closure.
+- `onDelta(text, kind?)` — appends to current segment. On kind change (`'text'` ↔ `'thinking'`), pushes current to `segments[]` and starts a new one. Schedules debounced `edit()` call (default 600ms).
+- `onDone()` — cancels timer, finalizes last segment, builds MarkdownV2 string: all segments have reserved chars escaped, thinking segments additionally prefixed with `> ` per line. Clears all state.
 
 ### `pi-client.ts`
 
@@ -99,9 +102,9 @@ Spawns subprocess with `stdio: ['pipe','pipe','pipe']`. Reads stdout via custom 
 
 | File | Purpose |
 |------|---------|
-| `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, fixture replay integration |
-| `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` |
+| `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration |
+| `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (also extracts `thinking_delta`) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs |
 
 ## Data flow
@@ -120,10 +123,11 @@ pi stdout
   → createPiClient attachJsonlReader
     → JSON.parse(line)
     → Gateway.handlePiEvent()
-      → [text_delta] → relay.onDelta(delta)
-        → [debounce 600ms] → api.editMessageText()
+      → [text_delta] → relay.onDelta(delta, 'text')
+      → [thinking_delta] → relay.onDelta(delta, 'thinking')
+        → [debounce 600ms] → api.editMessageText(buf, { parse_mode: "MarkdownV2" })
       → [agent_end] → relay.onDone()
-        → api.editMessageText(final)
+        → api.editMessageText(final, { parse_mode: "MarkdownV2" })
         → Gateway.processQueue()
           → [if queued] Gateway.startPiSession(next)
 ```
@@ -160,6 +164,8 @@ pi stdout
 - grammy basics: https://grammy.dev/guide/basics
 - grammy context: https://grammy.dev/guide/context
 - grammy Bot API: https://grammy.dev/guide/api
+- grammy parse-mode plugin (reference): https://grammy.dev/plugins/parse-mode
+- grammy MarkdownV2: https://core.telegram.org/bots/api#markdownv2-style
 - Bun docs: https://bun.sh/docs
 
 

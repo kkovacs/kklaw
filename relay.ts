@@ -1,16 +1,26 @@
 // relay.ts — debounced streaming relay for Telegram message edits
-// Uses @grammyjs/parse-mode for blockquote formatting on thinking content
-
-import type { MessageEntity } from "grammy/types";
-import { FormattedString } from "@grammyjs/parse-mode";
+// Builds MarkdownV2 text: text segments pass through as-is, thinking segments
+// are escaped and wrapped in `> ` blockquote prefix.
 
 export interface Relay {
   onDelta(text: string, kind?: 'text' | 'thinking'): void;
   onDone(): Promise<void>;
 }
 
+const MDV2_ESCAPE = /([_*[\]()~`>#+\-=|{}.!\\])/g;
+// Relaxed: allows `*`, `_`, `` ` `` through so Pi's **bold** / *italic* / `code` render
+const MDV2_ESCAPE_TEXT = /([[\]()~>#+\-=|{}.!\\])/g;
+
+function escapeMdV2(s: string): string {
+  return s.replace(MDV2_ESCAPE, '\\$1');
+}
+
+function escapeText(s: string): string {
+  return s.replace(MDV2_ESCAPE_TEXT, '\\$1');
+}
+
 export function createRelay(opts: {
-  edit(text: string, entities?: MessageEntity[]): Promise<unknown>;
+  edit(text: string): Promise<unknown>;
   debounceMs?: number;
   log?(msg: string): void;
 }): Relay {
@@ -21,28 +31,33 @@ export function createRelay(opts: {
   let editTimer: ReturnType<typeof setTimeout> | null = null;
   const debounceMs = opts.debounceMs ?? 600;
 
-  function buildFormattedString(): { text: string; entities?: MessageEntity[] } | null {
+  function buildText(): string {
     const allSegs = [...segments];
     if (currentText) {
       allSegs.push({ kind: currentKind, text: currentText });
     }
-    if (allSegs.length === 0) return null;
 
-    let fs: FormattedString | null = null;
+    let out = '';
     for (const seg of allSegs) {
       if (seg.kind === 'thinking') {
-        fs = fs ? fs.blockquote(seg.text) : FormattedString.blockquote(seg.text);
+        // Ensure blockquote `> ` lands at line start
+        if (out && !out.endsWith('\n')) out += '\n';
+        const escaped = escapeMdV2(seg.text);
+        const lines = escaped.split('\n');
+        for (const line of lines) {
+          out += '>' + (line ? ' ' + line : '') + '\n';
+        }
       } else {
-        fs = fs ? fs.plain(seg.text) : new FormattedString(seg.text);
+        out += escapeText(seg.text);
       }
     }
-    return { text: fs!.text, entities: fs!.entities };
+    return out;
   }
 
   function doEdit(): void {
-    const result = buildFormattedString();
-    if (!result || !result.text) return;
-    opts.edit(result.text, result.entities).catch(() => {});
+    const text = buildText();
+    if (!text) return;
+    opts.edit(text).catch(() => {});
   }
 
   function scheduleEdit(): void {
@@ -73,13 +88,13 @@ export function createRelay(opts: {
         segments.push({ kind: currentKind, text: currentText });
         currentText = '';
       }
-      const result = buildFormattedString();
-      if (!result || !result.text) {
+      const text = buildText();
+      if (!text) {
         opts.log?.("finalize: empty buffer, nothing to edit");
         return;
       }
-      opts.log?.(`final edit len=${result.text.length} segs=${segments.length}`);
-      await opts.edit(result.text, result.entities).catch(() => {});
+      opts.log?.(`final edit len=${text.length} segs=${segments.length}`);
+      await opts.edit(text).catch(() => {});
       segments = [];
       currentKind = 'text';
     },

@@ -1,5 +1,4 @@
 import { describe, it, expect } from "bun:test";
-import type { MessageEntity } from "grammy/types";
 import { createRelay } from "../relay";
 
 function sleep(ms: number): Promise<void> {
@@ -88,10 +87,10 @@ describe("createRelay", () => {
     expect(logs[1]).toContain("final edit");
   });
 
-  it("wraps thinking deltas in blockquote entities", async () => {
-    const edits: { text: string; entities?: MessageEntity[] }[] = [];
+  it("wraps thinking deltas with > blockquote prefix", async () => {
+    const edits: string[] = [];
     const relay = createRelay({
-      edit: async (text, entities) => edits.push({ text, entities }),
+      edit: async (text) => edits.push(text),
       debounceMs: 30,
     });
 
@@ -99,18 +98,26 @@ describe("createRelay", () => {
     await relay.onDone();
 
     expect(edits.length).toBe(1);
-    const first = edits[0]!;
-    expect(first.entities?.length).toBe(1);
-    expect(first.entities?.[0]!.type).toBe("blockquote");
-    // Blockquote entity spans the entire thinking text
-    expect(first.entities?.[0]!.offset).toBe(0);
-    expect(first.entities?.[0]!.length).toBe(first.text.length);
+    expect(edits[0]).toBe("> I think this is correct\\.\n");
+  });
+
+  it("escapes MarkdownV2 special chars in thinking content", async () => {
+    const edits: string[] = [];
+    const relay = createRelay({
+      edit: async (text) => edits.push(text),
+      debounceMs: 9999,
+    });
+
+    relay.onDelta("use *bold* and _italic_", 'thinking');
+    await relay.onDone();
+
+    expect(edits[0]).toBe("> use \\*bold\\* and \\_italic\\_\n");
   });
 
   it("interleaves text and thinking with correct formatting", async () => {
-    const edits: { text: string; entities?: MessageEntity[] }[] = [];
+    const edits: string[] = [];
     const relay = createRelay({
-      edit: async (text, entities) => edits.push({ text, entities }),
+      edit: async (text) => edits.push(text),
       debounceMs: 9999,
     });
 
@@ -119,37 +126,51 @@ describe("createRelay", () => {
     relay.onDelta(" Here is the answer.");
     await relay.onDone();
 
-    expect(edits.length).toBe(1);
-    // Should have one blockquote entity for the thinking part
-    const entities = edits[0]!.entities!;
-    const bqEntities = entities.filter((e) => e.type === "blockquote");
-    expect(bqEntities.length).toBe(1);
-    // The blockquote should cover text starting at offset 7 ("Hello. " is 7 chars)
-    expect(bqEntities[0]!.offset).toBe(7);
-    expect(bqEntities[0]!.length).toBe("Let me think...".length);
+    // Text, then thinking blockquoted with `> ` prefix, then text (all escaped)
+    expect(edits[0]).toBe("Hello\\. \n> Let me think\\.\\.\\.\n Here is the answer\\.");
   });
 
-  it("multiple thinking blocks each get blockquote entities", async () => {
-    const edits: { text: string; entities?: MessageEntity[] }[] = [];
+  it("multiple thinking blocks each get blockquote prefix", async () => {
+    const edits: string[] = [];
     const relay = createRelay({
-      edit: async (text, entities) => edits.push({ text, entities }),
+      edit: async (text) => edits.push(text),
       debounceMs: 9999,
     });
 
     relay.onDelta("Part 1. ");
     relay.onDelta("thinking 1", 'thinking');
-    relay.onDelta(" Part 2. ");
+    relay.onDelta("Part 2. ");
     relay.onDelta("thinking 2", 'thinking');
     await relay.onDone();
 
-    const entities = edits[0]!.entities!;
-    const bqEntities = entities.filter((e) => e.type === "blockquote");
-    expect(bqEntities.length).toBe(2);
+    expect(edits[0]).toBe("Part 1\\. \n> thinking 1\nPart 2\\. \n> thinking 2\n");
+  });
 
-    expect(bqEntities[0]!.offset).toBe(8); // after "Part 1. "
-    expect(bqEntities[0]!.length).toBe("thinking 1".length);
+  it("lets * _ ` through in text segments so Pi's markdown renders", async () => {
+    const edits: string[] = [];
+    const relay = createRelay({
+      edit: async (text) => edits.push(text),
+      debounceMs: 9999,
+    });
 
-    expect(bqEntities[1]!.offset).toBe(8 + "thinking 1".length + " Part 2. ".length);
-    expect(bqEntities[1]!.length).toBe("thinking 2".length);
+    relay.onDelta("Use **bold** and *italic* and `code`");
+    await relay.onDone();
+
+    // `*`, `_`, `` ` `` pass through unescaped — Telegram renders them as formatting
+    expect(edits[0]).toBe("Use **bold** and *italic* and `code`");
+  });
+
+  it("still escapes * _ ` inside thinking blocks", async () => {
+    const edits: string[] = [];
+    const relay = createRelay({
+      edit: async (text) => edits.push(text),
+      debounceMs: 9999,
+    });
+
+    relay.onDelta("maybe use *bold* here?", 'thinking');
+    await relay.onDone();
+
+    // Thinking uses strict escape — `*` gets escaped even though it's a formatting char
+    expect(edits[0]).toBe("> maybe use \\*bold\\* here?\n");
   });
 });
