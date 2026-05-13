@@ -46,7 +46,7 @@ interface PiEvent {
 // ============================================================
 
 export interface TelegramApi {
-  sendMessage(chatId: number | string, text: string): Promise<{ message_id: number }>;
+  sendMessage(chatId: number | string, text: string, other?: Record<string, unknown>): Promise<{ message_id: number }>;
   editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -67,6 +67,7 @@ export class Gateway {
   piStreaming = false;
   queue: QueuedMessage[] = [];
   currentRelay: Relay | null = null;
+  lastChatId: number | string = 0;
   allowedUserId: number;
   api: TelegramApi;
 
@@ -85,6 +86,12 @@ export class Gateway {
         console.error(`[pi] error (${resp.command}): ${resp.error}`);
       } else {
         dbg(1, `pi response ok: ${resp.command}`);
+        if (resp.command === "get_state" && this.lastChatId) {
+          this.showStatus(this.lastChatId, resp.data);
+        }
+        if (resp.command === "get_session_stats" && this.lastChatId) {
+          this.showStats(this.lastChatId, resp.data);
+        }
       }
       return;
     }
@@ -155,6 +162,52 @@ export class Gateway {
     this.currentRelay = null;
     this.piStreaming = false;
     this.queue = [];
+  }
+
+  async showStatus(chatId: number | string, data: unknown): Promise<void> {
+    const s = data as Record<string, unknown> | undefined;
+    if (!s) return;
+
+    const model = s.model as { provider?: string; modelId?: string; id?: string } | undefined;
+    const modelName = model
+      ? `${model.provider ?? "?"}/${model.modelId ?? model.id ?? "?"}`
+      : "?";
+
+    const lines = [
+      `Model:         ${modelName}`,
+      `Session:       ${s.sessionId ?? "?"}${s.sessionName ? ` ("${s.sessionName}")` : ""}`,
+      `Messages:      ${s.messageCount ?? 0}${s.pendingMessageCount ? ` (+${s.pendingMessageCount} pending)` : ""}`,
+      `Thinking:      ${s.thinkingLevel ?? "?"}`,
+    ];
+    if (s.sessionFile) lines.push(`Session file:  ${s.sessionFile}`);
+    const text = `<pre>${lines.join("\n")}</pre>`;
+    await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
+      console.error(`[telegram] showStatus failed: ${err.message}`),
+    );
+  }
+
+  async showStats(chatId: number | string, data: unknown): Promise<void> {
+    const s = data as Record<string, unknown> | undefined;
+    if (!s) return;
+
+    const tokens = s.tokens as Record<string, number> | undefined;
+    const tok = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+
+    const lines = [
+      `Session:       ${s.sessionId ?? "?"}`,
+      `Total messages: ${s.totalMessages ?? 0} (user: ${s.userMessages ?? 0}, assistant: ${s.assistantMessages ?? 0})`,
+      `Tool calls:    ${s.toolCalls ?? 0} / results: ${s.toolResults ?? 0}`,
+      `Tokens in:     ${tokens ? tok(tokens.input) : "?"}`,
+      `Tokens out:    ${tokens ? tok(tokens.output) : "?"}`,
+      `Tokens cache:  ${tokens ? `r:${tok(tokens.cacheRead)} w:${tok(tokens.cacheWrite)}` : "?"}`,
+      `Tokens total:  ${tokens ? tok(tokens.total) : "?"}`,
+      `Cost:          $${s.cost != null ? Number(s.cost).toFixed(4) : "?"}`,
+    ];
+    if (s.sessionFile) lines.push(`Session file:  ${s.sessionFile}`);
+    const text = `<pre>${lines.join("\n")}</pre>`;
+    await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
+      console.error(`[telegram] showStats failed: ${err.message}`),
+    );
   }
 
   async handleTextMessage(
@@ -241,6 +294,18 @@ if (import.meta.main) {
     gateway.resetSession();
     gateway.sendPi({ type: "new_session" });
     await ctx.reply("New session.");
+  });
+
+  bot.command("status", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.lastChatId = ctx.chatId;
+    gateway.sendPi({ type: "get_state" });
+  });
+
+  bot.command("context", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.lastChatId = ctx.chatId;
+    gateway.sendPi({ type: "get_session_stats" });
   });
 
   bot.on("message:text", async (ctx) => {

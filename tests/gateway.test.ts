@@ -219,3 +219,270 @@ describe("Integration: replay recorded fixture", () => {
     expect(edits[edits.length - 1]).toBe(expectedText);
   });
 });
+
+describe("Gateway.resetSession", () => {
+  it("clears relay, queue, and streaming state", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.piStreaming = true;
+    gateway.queue.push({ chatId: 123, text: "pending" });
+    await gateway.startPiSession(123, "active");
+    expect(gateway.currentRelay).not.toBeNull();
+
+    gateway.resetSession();
+
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
+    expect(gateway.currentRelay).toBeNull();
+  });
+});
+
+describe("Gateway.showStatus", () => {
+  it("formats get_state response as HTML <pre> and sends message", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const data = {
+      model: { provider: "opencode-go", modelId: "minimax-m2.5" },
+      sessionId: "abc123",
+      thinkingLevel: "medium",
+      messageCount: 5,
+      pendingMessageCount: 2,
+    };
+
+    await gateway.showStatus(456, data);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(456);
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("</pre>");
+    expect(messages[0]!.text).toContain("opencode-go/minimax-m2.5");
+    expect(messages[0]!.text).toContain("abc123");
+    expect(messages[0]!.text).toContain("medium");
+    expect(messages[0]!.text).toContain("5");
+    expect(messages[0]!.text).toContain("(+2 pending)");
+  });
+
+  it("shows session name when present", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showStatus(1, {
+      model: { provider: "x", modelId: "y" },
+      sessionId: "s1",
+      sessionName: "My Session",
+      thinkingLevel: "off",
+      messageCount: 0,
+    });
+
+    expect(messages[0]!.text).toContain('("My Session")');
+  });
+});
+
+describe("Gateway.showStats (/context)", () => {
+  it("formats get_session_stats response as HTML <pre> and sends message", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const data = {
+      sessionId: "abc123",
+      userMessages: 3,
+      assistantMessages: 5,
+      toolCalls: 2,
+      toolResults: 2,
+      totalMessages: 8,
+      tokens: { input: 1200, output: 450, cacheRead: 0, cacheWrite: 0, total: 1650 },
+      cost: 0.0023,
+      sessionFile: "some-session.jsonl",
+    };
+
+    await gateway.showStats(456, data);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(456);
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("</pre>");
+    expect(messages[0]!.text).toContain("abc123");
+    expect(messages[0]!.text).toContain("user: 3, assistant: 5");
+    expect(messages[0]!.text).toContain("Tool calls:    2 / results: 2");
+    expect(messages[0]!.text).toContain("1.2K"); // 1200 input
+    expect(messages[0]!.text).toContain("450");  // output < 1000, no abbreviation
+    expect(messages[0]!.text).toContain("1.6K"); // 1650 total
+    expect(messages[0]!.text).toContain("$0.0023");
+    expect(messages[0]!.text).toContain("some-session.jsonl");
+  });
+
+  it("formats large token counts with M suffix", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showStats(1, {
+      sessionId: "x",
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 0,
+      tokens: { input: 1_500_000, output: 2_000_000, cacheRead: 0, cacheWrite: 0, total: 3_500_000 },
+      cost: 5.0,
+    });
+
+    expect(messages[0]!.text).toContain("1.5M"); // 1.5M input
+    expect(messages[0]!.text).toContain("2.0M"); // 2.0M output
+    expect(messages[0]!.text).toContain("3.5M"); // 3.5M total
+    expect(messages[0]!.text).toContain("$5.0000");
+  });
+});
+
+describe("Gateway.handlePiEvent command routing", () => {
+  it("routes get_state response to showStatus when lastChatId is set", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"get_state","success":true,"data":{"model":{"provider":"p","modelId":"m"},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","sessionId":"sid","autoCompactionEnabled":true,"messageCount":1,"pendingMessageCount":0}}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("p/m");
+    expect(messages[0]!.text).toContain("sid");
+  });
+
+  it("routes get_session_stats response to showStats (/context) when lastChatId is set", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sid","userMessages":1,"assistantMessages":2,"toolCalls":0,"toolResults":0,"totalMessages":3,"tokens":{"input":100,"output":200,"cacheRead":0,"cacheWrite":0,"total":300},"cost":0.001}}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("sid");
+    expect(messages[0]!.text).toContain("user: 1, assistant: 2");
+    expect(messages[0]!.text).toContain("$0.0010");
+  });
+
+  it("does NOT route get_state response when lastChatId is 0", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 0;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"get_state","success":true,"data":{"model":{"provider":"p","modelId":"m"},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","sessionId":"sid","autoCompactionEnabled":true,"messageCount":1,"pendingMessageCount":0}}
+    `));
+
+    expect(called).toBe(false);
+  });
+
+  it("does NOT route other response commands to showStatus", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"new_session","success":true,"data":{"cancelled":false}}
+    `));
+
+    expect(called).toBe(false);
+  });
+});
+
+describe("Integration: replay command responses", () => {
+  it("replays get-state.jsonl and produces status message", async () => {
+    const messages: { text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text, other) => {
+        messages.push({ text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+
+    const lines = loadFixtureLines("get-state.jsonl");
+    for (const line of lines) {
+      gateway.handlePiEvent(JSON.parse(line));
+    }
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(messages[0]!.text).toContain("opencode-go/minimax-m2.5");
+    expect(messages[0]!.text).toContain("019e23a4-4c58-71a1-b3b9-6da3b6c97a28");
+    expect(messages[0]!.text).toContain("medium");
+    expect(messages[0]!.text).toContain("0");
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("</pre>");
+  });
+
+  it("replays get-session-stats.jsonl and produces context message", async () => {
+    const messages: { text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text, other) => {
+        messages.push({ text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+
+    const lines = loadFixtureLines("get-session-stats.jsonl");
+    for (const line of lines) {
+      gateway.handlePiEvent(JSON.parse(line));
+    }
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(messages[0]!.text).toContain("019e23a4-4c58-71a1-b3b9-6da3b6c97a28");
+    expect(messages[0]!.text).toContain("0");
+    expect(messages[0]!.text).toContain("$0.0000");
+    expect(messages[0]!.text).toContain("Session file:");
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("</pre>");
+  });
+});

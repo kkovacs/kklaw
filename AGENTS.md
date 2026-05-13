@@ -13,12 +13,22 @@ Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (
 
 ### Pipeline
 
-1. Telegram user sends a text message
+1. Telegram user sends a text message or slash command
 2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`
 3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `editMessageText` with `parse_mode: "MarkdownV2"` debounced at 600ms
 5. On `agent_end` → final edit, clear state, process next queued message
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
+
+#### Slash commands (Telegram → Pi RPC)
+
+Commands use a **loose coupling** pattern: the command handler stores `lastChatId`, fires the RPC command; the `handlePiEvent` response handler picks it up and posts to that chat. Single user, single connection, no promise plumbing.
+
+| Telegram command | RPC command | Response handler |
+|------------------|-------------|------------------|
+| `/new` | `new_session` | logs response; also cancels relay + resets state via `resetSession()` |
+| `/status` | `get_state` | `showStatus()` → formats into `<pre>` HTML block |
+| `/context` | `get_session_stats` | `showStats()` → formats token counts (K/M) + cost into `<pre>` HTML block |
 
 ### Key design decisions
 
@@ -27,7 +37,10 @@ Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (
 - **JSONL framer is custom**: Node's `readline` is incompatible (splits on `U+2028`/`U+2029` which are valid in JSON strings). Custom `\n`-only splitter with optional `\r` strip.
 - **Debounced streaming**: editing Telegram messages per-character would hit rate limits. Buffer accumulates deltas, `editMessageText` fires every 600ms, final edit on `agent_end`.
 - **Thinking via blockquote**: `thinking_delta` events are streamed alongside `text_delta`. The relay interleaves segments, wrapping thinking content in `> ` prefix (MarkdownV2 blockquote) with special characters escaped.
-- **MarkdownV2 parse_mode**: the entire message is sent with `parse_mode: "MarkdownV2"`. Both text and thinking segments are escaped to prevent parse errors — all reserved chars (`_ * [ ] ( ) ~ ` > # + - = | { } . ! \`) are escaped. Thinking content additionally gets `> ` blockquote prefix per line. Pi's `**bold**` etc. render as literal characters (not formatted).
+- **MarkdownV2 with dual escape**: the entire message is sent with `parse_mode: "MarkdownV2"`. Two escape levels:
+  - **Thinking**: strict escape (all reserved chars) → no accidental formatting inside `> ` blockquotes
+  - **Text**: relaxed escape (`*`, `_`, `` ` `` pass through) → Pi's `**bold**`, `*italic*`, `` `code` `` render
+  - Other reserved chars (`!`, `.`, `[`, `]`, `~`, etc.) are always escaped to prevent parse errors (400 Bad Request)
 - **Sequential processing**: pi handles one prompt at a time. Incoming messages while busy are queued FIFO.
 - **`--no-session`**: pi runs ephemeral (no session persistence across messages). Future: remove flag for conversation memory.
 - **Pi restart on crash**: `exit` handler spawns a new pi process after 1s delay.
@@ -39,6 +52,7 @@ Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (
 - `tool_execution_*` events not displayed
 - Message queue is in-memory only — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
+- Other builtin slash commands (`/model`, `/compact`, `/fork`, etc.) not registered yet
 
 ## Configuration (`.env`)
 
@@ -72,22 +86,27 @@ bun test           # run tests
 - `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, ignores `/` commands, enqueues or starts a pi session.
 - `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `Relay`, sends `{"type":"prompt",...}` to pi.
 - `handlePiEvent(event)` — routes pi events:
-  - `response` — log success/error
+  - `response` — log success/error; routes `get_state` → `showStatus()` and `get_session_stats` → `showStats()` when `lastChatId` is set
   - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
   - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
   - `agent_end` → `relay.onDone()`, then `processQueue()`
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
+- `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command.
+- `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking).
+- `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost).
+- `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 
 **Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, starts long polling. Not executed when imported for tests.
 
 ### `relay.ts`
 
-**`createRelay({ edit, debounceMs?, log? })` → `{ onDelta, onDone }`**
+**`createRelay({ edit, debounceMs?, log? })` → `{ onDelta, onDone, cancel }`**
 
 Pure function. Holds `segments`, `currentKind`, `currentText` and `editTimer` in closure.
 - `onDelta(text, kind?)` — appends to current segment. On kind change (`'text'` ↔ `'thinking'`), pushes current to `segments[]` and starts a new one. Schedules debounced `edit()` call (default 600ms).
-- `onDone()` — cancels timer, finalizes last segment, builds MarkdownV2 string: all segments have reserved chars escaped, thinking segments additionally prefixed with `> ` per line. Clears all state.
+- `onDone()` — cancels timer, finalizes last segment, builds MarkdownV2 string: thinking segments → strict escape (`escapeMdV2`) + `> ` prefix per line; text segments → relaxed escape (`escapeText`, lets `*` `_` `` ` `` through). Clears all state.
+- `cancel()` — clears timer and all segments/buffer without a final edit. Used by `resetSession()` before `/new`.
 
 ### `pi-client.ts`
 
@@ -103,9 +122,9 @@ Spawns subprocess with `stdio: ['pipe','pipe','pipe']`. Reads stdout via custom 
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration |
-| `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (also extracts `thinking_delta`) |
-| `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `handlePiEvent` routing for `get_state`/`get_session_stats`, fixture replay for status/context |
+| `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
+| `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl` for command integration tests |
 
 ## Data flow
 
@@ -119,10 +138,21 @@ Telegram message
       → createRelay({ edit: api.editMessageText })
       → sendPi({ type: "prompt", message: text })
 
+Telegram command (e.g. /status)
+  → bot.command("status", handler)
+    → [auth check]
+    → gateway.lastChatId = ctx.chatId
+    → sendPi({ type: "get_state" })
+  ... (loose coupling: response arrives later)
+  → Gateway.handlePiEvent()
+    → [response, command="get_state"] → showStatus(lastChatId, data)
+      → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
+
 pi stdout
   → createPiClient attachJsonlReader
     → JSON.parse(line)
     → Gateway.handlePiEvent()
+      → [response] → log success/error; route get_state/get_session_stats
       → [text_delta] → relay.onDelta(delta, 'text')
       → [thinking_delta] → relay.onDelta(delta, 'thinking')
         → [debounce 600ms] → api.editMessageText(buf, { parse_mode: "MarkdownV2" })
@@ -147,8 +177,9 @@ pi stdout
 **How to add a new fixture**
 1. Run the gateway with `-vv`: `bun run index.ts -vv 2>/tmp/log`
 2. Send the real Telegram message(s) you want to capture
-3. Extract pi stdout lines: `grep '^pi stdout:' /tmp/log > tests/fixtures/name.jsonl`
-4. Add an integration test in `gateway.test.ts` using `loadFixtureLines('name.jsonl')` and `extractTextDeltas()`
+3. Extract pi stdout lines: `grep '^pi stdout:' /tmp/log | sed 's/^pi stdout: //' > tests/fixtures/name.jsonl`
+4. For text prompts: add an integration test using `loadFixtureLines('name.jsonl')` and `extractTextDeltas()`
+5. For command responses (e.g. `get_state`, `get_session_stats`): replay through `handlePiEvent` with `lastChatId` set, capture `sendMessage` calls
 
 **Test conventions**
 - One concern per file (`relay.test.ts`, `gateway.test.ts`).
