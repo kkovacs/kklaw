@@ -16,12 +16,15 @@ const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 const PI_PROVIDER = process.env.PI_PROVIDER ?? "opencode";
 const PI_MODEL = process.env.PI_MODEL; // optional; pi picks its default
 
+console.error(`[debug] PI_PATH=${PI_PATH} PI_PROVIDER=${PI_PROVIDER} PI_MODEL=${PI_MODEL ?? "(default)"}`);
+
 const allowedUserIds = new Set<number>();
 const rawIds = process.env.TELEGRAM_ALLOWED_USER_IDS ?? "";
 for (const raw of rawIds.split(",")) {
   const id = parseInt(raw.trim(), 10);
   if (!isNaN(id)) allowedUserIds.add(id);
 }
+console.error(`[debug] allowed user IDs: ${[...allowedUserIds].join(",")}`);
 
 // ============================================================
 // JSONL Framer (pi stdin/stdout protocol)
@@ -57,10 +60,14 @@ function spawnPi(): void {
   const args = ["--mode", "rpc", "--no-session", "--provider", PI_PROVIDER];
   if (PI_MODEL) args.push("--model", PI_MODEL);
 
+  console.error(`[debug] spawning pi: ${PI_PATH} ${args.join(" ")}`);
+
   piProc = spawn(PI_PATH, args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env },
   });
+
+  console.error(`[debug] pi pid=${piProc.pid}`);
 
   piProc.stderr?.on("data", (data: Buffer | string) => {
     process.stderr.write(`[pi] ${data}`);
@@ -74,11 +81,13 @@ function spawnPi(): void {
   });
 
   attachJsonlReader(piProc.stdout!, (line: string) => {
+    console.error(`[debug] pi stdout: ${line}`);
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
-      return; // ignore unparsable lines
+      console.error(`[debug] pi unparsable line: ${line}`);
+      return;
     }
     handlePiEvent(event as PiEvent | PiResponse);
   });
@@ -106,7 +115,9 @@ function sendPi(cmd: Record<string, unknown>): void {
     console.error("[pi] cannot send command: pi not running");
     return;
   }
-  piProc.stdin.write(JSON.stringify(cmd) + "\n");
+  const raw = JSON.stringify(cmd);
+  console.error(`[debug] sendPi: ${raw}`);
+  piProc.stdin.write(raw + "\n");
 }
 
 // ============================================================
@@ -122,9 +133,11 @@ let editTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleEdit(): void {
   if (editTimer) return;
+  console.error(`[debug] scheduling edit in ${DEBOUNCE_MS}ms (buffer=${replyBuffer.length})`);
   editTimer = setTimeout(() => {
     editTimer = null;
     if (currentChatId === null || currentMessageId === null || !replyBuffer) return;
+    console.error(`[debug] editMessageText chat=${currentChatId} msg=${currentMessageId} len=${replyBuffer.length}`);
     bot.api
       .editMessageText(currentChatId, currentMessageId, replyBuffer)
       .catch((err: Error) =>
@@ -138,7 +151,12 @@ async function finalizeReply(): Promise<void> {
     clearTimeout(editTimer);
     editTimer = null;
   }
-  if (currentChatId === null || currentMessageId === null || !replyBuffer) return;
+  if (currentChatId === null || currentMessageId === null || !replyBuffer) {
+    console.error(`[debug] finalizeReply: no state to finalize`);
+    return;
+  }
+
+  console.error(`[debug] final edit chat=${currentChatId} msg=${currentMessageId} len=${replyBuffer.length}`);
 
   await bot.api
     .editMessageText(currentChatId, currentMessageId, replyBuffer)
@@ -157,11 +175,14 @@ async function finalizeReply(): Promise<void> {
 
 function handlePiEvent(event: PiEvent | PiResponse): void {
   const type = event.type;
+  console.error(`[debug] pi event type=${type}`);
 
   if (type === "response") {
     const resp = event as PiResponse;
     if (!resp.success) {
       console.error(`[pi] error (${resp.command}): ${resp.error}`);
+    } else {
+      console.error(`[debug] pi response ok: ${resp.command}`);
     }
     return;
   }
@@ -176,12 +197,14 @@ function handlePiEvent(event: PiEvent | PiResponse): void {
   }
 
   if (type === "agent_end") {
+    console.error(`[debug] agent_end, replyBuffer length=${replyBuffer.length}`);
     piStreaming = false;
     finalizeReply().then(() => processQueue());
     return;
   }
 
   // XXX: other events not handled yet (tool_execution, extension_ui, etc.)
+  console.error(`[debug] unhandled pi event type: ${type}`);
 }
 
 // ============================================================
@@ -199,6 +222,7 @@ async function startPiSession(
   chatId: number | string,
   text: string,
 ): Promise<void> {
+  console.error(`[debug] startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
   piStreaming = true;
   currentChatId = chatId;
 
@@ -209,6 +233,7 @@ async function startPiSession(
 }
 
 function processQueue(): void {
+  console.error(`[debug] processQueue: piStreaming=${piStreaming} queue.length=${queue.length}`);
   if (piStreaming) return;
   const next = queue.shift();
   if (!next) return;
@@ -225,8 +250,10 @@ bot.command("start", async (ctx) => {
 
 bot.on("message:text", async (ctx) => {
   const userId = ctx.from?.id;
+  console.error(`[debug] message:text from user=${userId} chat=${ctx.chatId} text="${ctx.msg.text?.slice(0, 80)}"`);
+
   if (userId === undefined || !allowedUserIds.has(userId)) {
-    // XXX: silently ignore — could reply with rejection for non-empty set
+    console.error(`[debug] rejected user ${userId} (allowed: ${[...allowedUserIds].join(",")})`);
     return;
   }
 
@@ -234,6 +261,7 @@ bot.on("message:text", async (ctx) => {
   if (!text || text.startsWith("/")) return;
 
   if (piStreaming) {
+    console.error(`[debug] pi busy, queuing message (queue.length=${queue.length})`);
     queue.push({ chatId: ctx.chatId, text });
     await ctx.reply("⏳ Queued.");
     return;
