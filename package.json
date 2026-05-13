@@ -10,6 +10,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@grammyjs/parse-mode": "^2.3.0",
     "grammy": "^1.42.0"
   }
 }

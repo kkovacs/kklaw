@@ -47,7 +47,7 @@ interface PiEvent {
 
 export interface TelegramApi {
   sendMessage(chatId: number | string, text: string): Promise<{ message_id: number }>;
-  editMessageText(chatId: number | string, messageId: number, text: string): Promise<unknown>;
+  editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
 }
 
 export interface MessageContext {
@@ -92,7 +92,9 @@ export class Gateway {
     if (type === "message_update") {
       const delta = (event as PiEvent).assistantMessageEvent;
       if (delta?.type === "text_delta" && delta.delta) {
-        this.currentRelay?.onDelta(delta.delta);
+        this.currentRelay?.onDelta(delta.delta, 'text');
+      } else if (delta?.type === "thinking_delta" && delta.delta) {
+        this.currentRelay?.onDelta(delta.delta, 'thinking');
       }
       return;
     }
@@ -129,8 +131,8 @@ export class Gateway {
     const messageId = placeholder.message_id;
 
     this.currentRelay = createRelay({
-      edit: (buf) =>
-        api.editMessageText(chatId, messageId, buf).catch((err: Error) =>
+      edit: (buf, entities) =>
+        api.editMessageText(chatId, messageId, buf, entities ? { entities } : {}).catch((err: Error) =>
           console.error(`[telegram] edit failed: ${err.message}`),
         ),
       log: (msg) => dbg(1, msg),

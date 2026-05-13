@@ -58,7 +58,7 @@ describe("Gateway.handleTextMessage", () => {
     await gateway.handleTextMessage(ctx, api);
 
     expect(gateway.queue.length).toBe(1);
-    expect(gateway.queue[0].text).toBe("second msg");
+    expect(gateway.queue[0]!.text).toBe("second msg");
     expect(replies).toEqual(["⏳ Queued."]);
   });
 
@@ -136,6 +136,34 @@ describe("Gateway.handlePiEvent", () => {
     // Force flush by calling onDone (simulates agent_end)
     await gateway.currentRelay!.onDone();
     expect(edits).toEqual(["hi"]);
+  });
+
+  it("streams thinking_delta through relay with blockquote", async () => {
+    const edits: { text: string; entities?: unknown }[] = [];
+    const gateway = new Gateway({
+      allowedUserId: 1,
+      api: {
+        sendMessage: async () => ({ message_id: 1 }),
+        editMessageText: async (_c, _m, text, other) => {
+          edits.push({ text, entities: other?.entities });
+        },
+      },
+    });
+
+    await gateway.startPiSession(123, "test");
+
+    gateway.handlePiEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", delta: "hmm..." },
+    });
+
+    await gateway.currentRelay!.onDone();
+
+    expect(edits.length).toBe(1);
+    expect(edits[0]!.text).toBe("hmm...");
+    const entities = edits[0]!.entities as Array<{ type: string }>;
+    expect(entities?.length).toBe(1);
+    expect(entities?.[0]!.type).toBe("blockquote");
   });
 
   it("clears state on agent_end and processes queue", async () => {

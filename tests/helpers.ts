@@ -19,11 +19,11 @@ export function extractTextDeltas(jsonlLines: string[]): string {
   for (const line of jsonlLines) {
     try {
       const obj = JSON.parse(line);
-      if (
-        obj.type === "message_update" &&
-        obj.assistantMessageEvent?.type === "text_delta"
-      ) {
-        text += obj.assistantMessageEvent.delta;
+      if (obj.type === "message_update") {
+        const e = obj.assistantMessageEvent;
+        if ((e?.type === "text_delta" || e?.type === "thinking_delta") && e.delta) {
+          text += e.delta;
+        }
       }
     } catch {
       // ignore unparsable lines
