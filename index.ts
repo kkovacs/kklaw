@@ -149,6 +149,14 @@ export class Gateway {
     this.startPiSession(next.chatId, next.text, api);
   }
 
+  resetSession(): void {
+    dbg(1, "resetSession");
+    this.currentRelay?.cancel();
+    this.currentRelay = null;
+    this.piStreaming = false;
+    this.queue = [];
+  }
+
   async handleTextMessage(
     ctx: MessageContext,
     api: TelegramApi = this.api,
@@ -226,6 +234,13 @@ if (import.meta.main) {
 
   bot.command("start", async (ctx) => {
     await ctx.reply("Send a message to talk to pi.");
+  });
+
+  bot.command("new", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.resetSession();
+    gateway.sendPi({ type: "new_session" });
+    await ctx.reply("New session.");
   });
 
   bot.on("message:text", async (ctx) => {

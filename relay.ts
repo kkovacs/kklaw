@@ -5,6 +5,7 @@
 export interface Relay {
   onDelta(text: string, kind?: 'text' | 'thinking'): void;
   onDone(): Promise<void>;
+  cancel(): void;
 }
 
 const MDV2_ESCAPE = /([_*[\]()~`>#+\-=|{}.!\\])/g;
@@ -97,6 +98,16 @@ export function createRelay(opts: {
       await opts.edit(text).catch(() => {});
       segments = [];
       currentKind = 'text';
+    },
+
+    cancel(): void {
+      if (editTimer) {
+        clearTimeout(editTimer);
+        editTimer = null;
+      }
+      segments = [];
+      currentKind = 'text';
+      currentText = '';
     },
   };
 }
