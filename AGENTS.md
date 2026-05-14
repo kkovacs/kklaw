@@ -42,7 +42,6 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
   - **Text**: relaxed escape (`*`, `_`, `` ` `` pass through) → Pi's `**bold**`, `*italic*`, `` `code` `` render
   - Other reserved chars (`!`, `.`, `[`, `]`, `~`, etc.) are always escaped to prevent parse errors (400 Bad Request)
 - **Sequential processing**: pi handles one prompt at a time. Incoming messages while busy are queued FIFO.
-- **`--no-session`**: pi runs ephemeral (no session persistence across messages). Future: remove flag for conversation memory.
 - **Pi restart on crash**: `exit` handler spawns a new pi process after 1s delay.
 - **`drop_pending_updates: true`**: avoids processing stale Telegram messages on restart.
 
@@ -64,8 +63,12 @@ Bun auto-loads `.env` — no library needed.
 | `TELEGRAM_ALLOWED_USER_ID` | single Telegram user ID to accept | — (empty = no one) |
 | `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
-| `PI_PROVIDER` | pi `--provider` flag | `opencode` |
-| `PI_MODEL` | pi `--model` flag | (pi default) |
+
+Extra Pi flags (provider, model, no-session, etc.) are passed on the command line after `--`:
+
+```bash
+bun run index.ts -- --provider opencode-go --model minimax-m2.5 --no-session
+```
 
 ## Commands
 
@@ -79,7 +82,7 @@ bun test           # run tests
 
 ### `index.ts`
 
-**Config** — reads `TELEGRAM_BOT_TOKEN`, `PI_PATH`, `PI_PROVIDER`, `PI_MODEL`, `TELEGRAM_ALLOWED_USER_ID`, verbosity flags (`-v`, `-vv`).
+**Config** — reads `TELEGRAM_BOT_TOKEN`, `PI_PATH`, `TELEGRAM_ALLOWED_USER_ID`, verbosity flags (`-v`, `-vv`). Additional Pi flags passed after `--` on command line.
 
 **`Gateway` class** — all mutable state + business logic:
 

@@ -9,8 +9,6 @@ import { createPiClient, type PiClient } from "./pi-client";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
-const PI_PROVIDER = process.env.PI_PROVIDER ?? "opencode";
-const PI_MODEL = process.env.PI_MODEL; // optional; pi picks its default
 
 // Verbosity: -v = events/states, -vv = also full JSON
 const verbosity = process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
@@ -252,14 +250,17 @@ if (import.meta.main) {
 
   const bot = new Bot(TOKEN);
 
-  dbg(1, `PI_PATH=${PI_PATH} PI_PROVIDER=${PI_PROVIDER} PI_MODEL=${PI_MODEL ?? "(default)"}`);
+  dbg(1, `PI_PATH=${PI_PATH}`);
   dbg(1, `allowedUserId=${allowedUserId}`);
 
   const gateway = new Gateway({ allowedUserId, api: bot.api });
 
   function spawnPi(): void {
-    const args = ["--mode", "rpc", "--no-session", "--provider", PI_PROVIDER];
-    if (PI_MODEL) args.push("--model", PI_MODEL);
+    const args = ["--mode", "rpc"];
+
+    // pass-through args after --
+    const dashDash = process.argv.indexOf("--");
+    if (dashDash !== -1) args.push(...process.argv.slice(dashDash + 1));
 
     dbg(1, `spawning pi: ${PI_PATH} ${args.join(" ")}`);
 
