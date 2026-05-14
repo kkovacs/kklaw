@@ -10,10 +10,25 @@ import { createPiClient, type PiClient } from "./pi-client";
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 
-// Verbosity: -v = events/states, -vv = also full JSON
-const verbosity = process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
-function dbg(level: 1 | 2, msg: string): void {
-  if (verbosity >= level) console.error(msg);
+// Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
+const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
+const STREAMING_EVENTS = new Set(["message_update", "message_start", "message_end", "turn_start", "turn_end"]);
+let streamingDots = 0;
+
+function flushDots(): void {
+  if (streamingDots > 0) { process.stderr.write("\n"); streamingDots = 0; }
+}
+
+function dbg(level: 1 | 2 | 3, msg: string): void {
+  if (verbosity >= level) {
+    flushDots();
+    console.error(msg);
+  }
+}
+
+function streamingTick(): void {
+  streamingDots++;
+  process.stderr.write(".");
 }
 
 const allowedUserId = parseInt(process.env.TELEGRAM_ALLOWED_USER_ID ?? "", 10);
@@ -245,8 +260,14 @@ export class Gateway {
 
   handlePiEvent = async (event: PiEvent | PiResponse): Promise<void> => {
     const type = event.type;
-    dbg(1, `pi event type=${type}`);
-    if (verbosity >= 2) {
+    if (STREAMING_EVENTS.has(type)) {
+      if (verbosity >= 3) dbg(3, `pi event type=${type}`);
+      else streamingTick();
+    } else {
+      dbg(1, `pi event type=${type}`);
+    }
+    if (verbosity >= 3) {
+      flushDots();
       console.error(`[pi] event JSON: ${JSON.stringify(event)}`);
     }
 
@@ -280,7 +301,8 @@ export class Gateway {
       } else if (delta?.type === "error") {
         const reason = delta.reason ?? "unknown";
         console.error(`[pi] stream error: ${reason}`);
-        if (verbosity >= 2) {
+        if (verbosity >= 3) {
+          flushDots();
           console.error(`[pi] stream error JSON: ${JSON.stringify(event)}`);
         }
       }
@@ -511,7 +533,7 @@ if (import.meta.main) {
       args,
       env: process.env,
       onEvent: gateway.handlePiEvent,
-      onLine: (line) => dbg(2, `pi stdout: ${line}`),
+      onLine: (line) => dbg(3, `pi stdout: ${line}`),
       onStderr: (data) => process.stderr.write(`[pi] ${data}`),
       onExit: (code) => {
         gateway.piStreaming = false;
