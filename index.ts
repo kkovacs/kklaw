@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { homedir } from "node:os";
 import { createRelay, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
@@ -234,6 +234,7 @@ export class Gateway {
   currentChatId: number | string = 0;
   currentPlaceholderMessageId: number = 0;
   lastPiError?: string;
+  showThinking = false;
   allowedUserId: number;
   api: TelegramApi;
 
@@ -270,7 +271,9 @@ export class Gateway {
       if (delta?.type === "text_delta" && delta.delta) {
         this.currentRelay?.onDelta(delta.delta, 'text');
       } else if (delta?.type === "thinking_delta" && delta.delta) {
-        this.currentRelay?.onDelta(delta.delta, 'thinking');
+        if (this.showThinking) {
+          this.currentRelay?.onDelta(delta.delta, 'thinking');
+        }
       } else if (delta?.type === "error") {
         const reason = delta.reason ?? "unknown";
         console.error(`[pi] stream error: ${reason}`);
@@ -528,6 +531,34 @@ if (import.meta.main) {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_session_stats" });
+  });
+
+  bot.command("showthink", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    const kb = new InlineKeyboard()
+      .text(gateway.showThinking ? "✅ Yes" : "Yes", "showthink:yes")
+      .text(gateway.showThinking ? "No" : "✅ No", "showthink:no");
+    await ctx.reply("Show LLM thinking?", { reply_markup: kb });
+  });
+
+  bot.callbackQuery("showthink:yes", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.showThinking = true;
+    await ctx.answerCallbackQuery("Enabled.");
+    const kb = new InlineKeyboard()
+      .text("✅ Yes", "showthink:yes")
+      .text("No", "showthink:no");
+    await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  });
+
+  bot.callbackQuery("showthink:no", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.showThinking = false;
+    await ctx.answerCallbackQuery("Disabled.");
+    const kb = new InlineKeyboard()
+      .text("Yes", "showthink:yes")
+      .text("✅ No", "showthink:no");
+    await ctx.editMessageReplyMarkup({ reply_markup: kb });
   });
 
   bot.on("message:text", async (ctx) => {

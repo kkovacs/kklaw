@@ -151,6 +151,7 @@ describe("Gateway.handlePiEvent", () => {
     });
 
     await gateway.startPiSession(123, "test");
+    gateway.showThinking = true;
 
     gateway.handlePiEvent({
       type: "message_update",
@@ -162,6 +163,38 @@ describe("Gateway.handlePiEvent", () => {
     expect(edits.length).toBe(1);
     expect(edits[0]!.text).toBe("> hmm\\.\\.\\.\n");
     expect(edits[0]!.parse_mode).toBe("MarkdownV2");
+  });
+
+  it("drops thinking_delta when showThinking is false (default)", async () => {
+    const edits: string[] = [];
+    const gateway = new Gateway({
+      allowedUserId: 1,
+      api: {
+        sendMessage: async () => ({ message_id: 1 }),
+        editMessageText: async (_c, _m, text) => { edits.push(text); },
+      },
+    });
+
+    await gateway.startPiSession(123, "test");
+
+    // Fire a thinking_delta — should be swallowed
+    gateway.handlePiEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", delta: "secret reasoning" },
+    });
+
+    // Fire a text_delta — should still come through
+    gateway.handlePiEvent({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "visible answer" },
+    });
+
+    await gateway.currentRelay!.onDone();
+
+    // Only the text delta should appear, no thinking blockquote
+    expect(edits.length).toBe(1);
+    expect(edits[0]).not.toContain("secret reasoning");
+    expect(edits[0]).toContain("visible answer");
   });
 
   it("clears state on agent_end and processes queue", async () => {
@@ -226,6 +259,7 @@ describe("Integration: replay recorded fixture", () => {
     };
 
     const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.showThinking = true;
     await gateway.startPiSession(123, "Hello robot!", api);
 
     for (const line of lines) {
