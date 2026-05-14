@@ -262,6 +262,9 @@ export class Gateway {
         if (resp.command === "get_session_stats" && this.lastChatId) {
           this.showStats(this.lastChatId, resp.data);
         }
+        if (resp.command === "get_last_assistant_text" && this.lastChatId) {
+          this.showLastMessage(this.lastChatId, resp.data);
+        }
       }
       return;
     }
@@ -408,6 +411,21 @@ export class Gateway {
     );
   }
 
+  async showLastMessage(chatId: number | string, data: unknown): Promise<void> {
+    const d = data as Record<string, unknown> | undefined;
+    if (!d) return;
+    const text = d.text as string | null | undefined;
+    if (!text) {
+      await this.api.sendMessage(chatId, "(No assistant messages yet.)").catch((err: Error) =>
+        console.error(`[telegram] showLastMessage failed: ${err.message}`),
+      );
+      return;
+    }
+    await this.api.sendMessage(chatId, text).catch((err: Error) =>
+      console.error(`[telegram] showLastMessage failed: ${err.message}`),
+    );
+  }
+
   async showStats(chatId: number | string, data: unknown): Promise<void> {
     const s = data as Record<string, unknown> | undefined;
     if (!s) return;
@@ -531,6 +549,12 @@ if (import.meta.main) {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_session_stats" });
+  });
+
+  bot.command("last", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.lastChatId = ctx.chatId;
+    gateway.sendPi({ type: "get_last_assistant_text" });
   });
 
   bot.command("showthink", async (ctx) => {

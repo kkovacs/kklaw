@@ -29,6 +29,8 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 | `/new` | `new_session` | logs response; also cancels relay + resets state via `resetSession()` |
 | `/status` | `get_state` | `showStatus()` → formats into `<pre>` HTML block |
 | `/context` | `get_session_stats` | `showStats()` → formats token counts (K/M) + cost into `<pre>` HTML block |
+| `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text as plain message |
+| `/showthink` | (none) | toggles `showThinking` via inline keyboard (Yes/No) |
 
 ### Key design decisions
 
@@ -103,7 +105,7 @@ bun test           # run tests
 - `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, ignores `/` commands, enqueues or starts a pi session.
 - `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt",...}` to pi.
 - `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
-  - `response` — log success/error; routes `get_state` → `showStatus()` and `get_session_stats` → `showStats()` when `lastChatId` is set
+  - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()` when `lastChatId` is set
   - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
   - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
   - `message_update` with `error` → logs to stderr immediately (always, even without `-v`)
@@ -114,6 +116,7 @@ bun test           # run tests
 - `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command.
 - `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking).
 - `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost).
+- `showLastMessage(chatId, data)` — sends `get_last_assistant_text` response as a plain Telegram message (no parse_mode). Falls back to `"(No assistant messages yet.)"` when text is null.
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
 - `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
@@ -143,9 +146,9 @@ Spawns subprocess with `stdio: ['pipe','pipe','pipe']`. Reads stdout via custom 
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `handlePiEvent` routing for `get_state`/`get_session_stats`, fixture replay for status/context; **Pi error bubbling when stream produces no content** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
-| `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl` for command integration tests |
+| `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
 ## Data flow
 

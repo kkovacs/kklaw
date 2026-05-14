@@ -419,6 +419,56 @@ describe("Gateway.showStats (/context)", () => {
   });
 });
 
+describe("Gateway.showLastMessage (/last)", () => {
+  it("sends last assistant text as plain message (no parse_mode)", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showLastMessage(456, {
+      text: "Got it, just testing the waters.",
+    });
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(456);
+    expect(messages[0]!.text).toBe("Got it, just testing the waters.");
+    expect(messages[0]!.other).toBeUndefined();
+  });
+
+  it("sends placeholder when text is null (no assistant messages yet)", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showLastMessage(1, { text: null });
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe("(No assistant messages yet.)");
+  });
+
+  it("sends placeholder when data is undefined", async () => {
+    const messages: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push(text); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showLastMessage(1, undefined);
+
+    expect(messages.length).toBe(0);
+  });
+});
+
 describe("Gateway.handlePiEvent command routing", () => {
   it("routes get_state response to showStatus when lastChatId is set", async () => {
     const messages: { text: string }[] = [];
@@ -457,6 +507,23 @@ describe("Gateway.handlePiEvent command routing", () => {
     expect(messages[0]!.text).toContain("sid");
     expect(messages[0]!.text).toContain("user: 1, assistant: 2");
     expect(messages[0]!.text).toContain("$0.0010");
+  });
+
+  it("routes get_last_assistant_text response to showLastMessage when lastChatId is set", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"get_last_assistant_text","success":true,"data":{"text":"the last reply"}}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe("the last reply");
   });
 
   it("does NOT route get_state response when lastChatId is 0", async () => {
@@ -545,5 +612,28 @@ describe("Integration: replay command responses", () => {
     expect(messages[0]!.text).toContain("Session file:");
     expect(messages[0]!.text).toContain("<pre>");
     expect(messages[0]!.text).toContain("</pre>");
+  });
+
+  it("replays get-last-assistant-text.jsonl and produces last message", async () => {
+    const messages: { text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text, other) => {
+        messages.push({ text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+
+    const lines = loadFixtureLines("get-last-assistant-text.jsonl");
+    for (const line of lines) {
+      gateway.handlePiEvent(JSON.parse(line));
+    }
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.other).toBeUndefined();
+    expect(messages[0]!.text).toContain("Got it, just testing the waters.");
+    expect(messages[0]!.text).toContain("Ready when you need me for anything kklaw-related!");
   });
 });
