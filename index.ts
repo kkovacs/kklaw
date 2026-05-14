@@ -60,6 +60,162 @@ interface QueuedMessage {
   text: string;
 }
 
+function createSafeEditor(
+  api: TelegramApi,
+  chatId: number | string,
+  firstMessageId: number,
+  log?: (msg: string) => void,
+) {
+  const messageIds: number[] = [firstMessageId];
+  const lastGoodTexts: string[] = [""];
+  let frozenLength = 0;
+
+  function errMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function isNotModifiedError(err: unknown): boolean {
+    return errMessage(err).includes("message is not modified");
+  }
+
+  function isParseError(err: unknown): boolean {
+    const msg = errMessage(err).toLowerCase();
+    return (
+      msg.includes("can't parse entities") ||
+      msg.includes("unsupported start tag") ||
+      msg.includes("unexpected end tag") ||
+      msg.includes("entity name expected") ||
+      msg.includes("parse entities") ||
+      msg.includes("can't parse message text")
+    );
+  }
+
+  function isTooLongError(err: unknown): boolean {
+    const msg = errMessage(err).toLowerCase();
+    return msg.includes("message_too_long") || msg.includes("message is too long");
+  }
+
+  function splitTelegramText(text: string, maxLen = 4000): string[] {
+    if (text.length <= maxLen) return [text];
+    const chunks: string[] = [];
+    let remaining = text;
+    while (remaining.length > maxLen) {
+      let cut = remaining.lastIndexOf("\n", maxLen);
+      if (cut < maxLen * 0.5) cut = remaining.lastIndexOf(" ", maxLen);
+      if (cut < maxLen * 0.5) cut = maxLen;
+      chunks.push(remaining.slice(0, cut).trimEnd());
+      remaining = remaining.slice(cut).trimStart();
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks.length > 0 ? chunks : [""];
+  }
+
+  async function rollbackLastMessage(messageId: number, goodText: string): Promise<void> {
+    try {
+      await api.editMessageText(chatId, messageId, goodText, { parse_mode: "MarkdownV2" });
+    } catch (err) {
+      if (isNotModifiedError(err)) return;
+      if (isParseError(err)) {
+        try {
+          await api.editMessageText(chatId, messageId, goodText);
+        } catch (plainErr) {
+          if (!isNotModifiedError(plainErr)) {
+            log?.(`[telegram] plain rollback edit failed: ${errMessage(plainErr)}`);
+          }
+        }
+        return;
+      }
+      log?.(`[telegram] rollback edit failed: ${errMessage(err)}`);
+    }
+  }
+
+  async function sendChunk(text: string, parseMode: boolean): Promise<{ message_id: number }> {
+    try {
+      if (parseMode) {
+        return await api.sendMessage(chatId, text, { parse_mode: "MarkdownV2" });
+      }
+      return await api.sendMessage(chatId, text);
+    } catch (err) {
+      if (parseMode && isParseError(err)) {
+        return await api.sendMessage(chatId, text);
+      }
+      throw err;
+    }
+  }
+
+  return {
+    async edit(fullText: string, isFinal?: boolean): Promise<void> {
+      const candidate = fullText.slice(frozenLength);
+      const lastIndex = messageIds.length - 1;
+      const lastMessageId = messageIds[lastIndex];
+
+      try {
+        await api.editMessageText(chatId, lastMessageId, candidate, { parse_mode: "MarkdownV2" });
+        lastGoodTexts[lastIndex] = candidate;
+      } catch (err) {
+        if (isNotModifiedError(err)) {
+          return;
+        }
+
+        if (isTooLongError(err)) {
+          const goodText = lastGoodTexts[lastIndex];
+          if (goodText && goodText !== candidate) {
+            await rollbackLastMessage(lastMessageId, goodText);
+          }
+
+          const remainder = candidate.slice(goodText.length);
+          if (!remainder) return;
+
+          let textToChunk = remainder;
+          if (goodText && !goodText.endsWith('\n')) {
+            const lastNewline = goodText.lastIndexOf('\n');
+            const lastLine = lastNewline >= 0 ? goodText.slice(lastNewline + 1) : goodText;
+            if (lastLine.startsWith('>') && !remainder.startsWith('>')) {
+              textToChunk = '> ' + remainder;
+            }
+          }
+
+          const chunks = splitTelegramText(textToChunk, 4000);
+
+          for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            const isLastChunk = i === chunks.length - 1;
+            try {
+              const sent = await sendChunk(chunk, true);
+              messageIds.push(sent.message_id);
+              lastGoodTexts.push(chunk);
+              if (!isLastChunk) {
+                frozenLength += chunk.length;
+              }
+            } catch (sendErr) {
+              log?.(`[telegram] send chunk failed: ${errMessage(sendErr)}`);
+              throw sendErr;
+            }
+          }
+
+          frozenLength += goodText.length;
+          return;
+        }
+
+        if (isParseError(err)) {
+          if (isFinal) {
+            try {
+              await api.editMessageText(chatId, lastMessageId, candidate);
+            } catch (fallbackErr) {
+              log?.(`[telegram] plain fallback edit failed: ${errMessage(fallbackErr)}`);
+            }
+          } else {
+            log?.(`[telegram] parse error during streaming, will retry later: ${errMessage(err)}`);
+          }
+          return;
+        }
+
+        log?.(`[telegram] edit failed: ${errMessage(err)}`);
+      }
+    },
+  };
+}
+
 export class Gateway {
   piClient: PiClient | null = null;
   piStreaming = false;
@@ -135,9 +291,11 @@ export class Gateway {
     const placeholder = await api.sendMessage(chatId, "...");
     const messageId = placeholder.message_id;
 
+    const editor = createSafeEditor(api, chatId, messageId, (msg) => dbg(1, msg));
+
     this.currentRelay = createRelay({
-      edit: (buf) =>
-        api.editMessageText(chatId, messageId, buf, { parse_mode: "MarkdownV2" }).catch((err: Error) =>
+      edit: (buf, isFinal) =>
+        editor.edit(buf, isFinal).catch((err: Error) =>
           console.error(`[telegram] edit failed: ${err.message}`),
         ),
       log: (msg) => dbg(1, msg),

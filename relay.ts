@@ -21,7 +21,7 @@ function escapeText(s: string): string {
 }
 
 export function createRelay(opts: {
-  edit(text: string): Promise<unknown>;
+  edit(text: string, isFinal?: boolean): Promise<unknown>;
   debounceMs?: number;
   log?(msg: string): void;
 }): Relay {
@@ -95,7 +95,7 @@ export function createRelay(opts: {
         return;
       }
       opts.log?.(`final edit len=${text.length} segs=${segments.length}`);
-      await opts.edit(text).catch(() => {});
+      await opts.edit(text, true).catch(() => {});
       segments = [];
       currentKind = 'text';
     },
