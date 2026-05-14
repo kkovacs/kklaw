@@ -36,7 +36,16 @@ interface PiEvent {
   assistantMessageEvent?: {
     type: string;
     delta?: string;
+    reason?: string;
   };
+  message?: {
+    stopReason?: string;
+    errorMessage?: string;
+  };
+  messages?: Array<{
+    stopReason?: string;
+    errorMessage?: string;
+  }>;
 }
 
 // ============================================================
@@ -222,6 +231,9 @@ export class Gateway {
   queue: QueuedMessage[] = [];
   currentRelay: Relay | null = null;
   lastChatId: number | string = 0;
+  currentChatId: number | string = 0;
+  currentPlaceholderMessageId: number = 0;
+  lastPiError?: string;
   allowedUserId: number;
   api: TelegramApi;
 
@@ -230,9 +242,12 @@ export class Gateway {
     this.api = options.api;
   }
 
-  handlePiEvent = (event: PiEvent | PiResponse): void => {
+  handlePiEvent = async (event: PiEvent | PiResponse): Promise<void> => {
     const type = event.type;
     dbg(1, `pi event type=${type}`);
+    if (verbosity >= 2) {
+      console.error(`[pi] event JSON: ${JSON.stringify(event)}`);
+    }
 
     if (type === "response") {
       const resp = event as PiResponse;
@@ -256,6 +271,24 @@ export class Gateway {
         this.currentRelay?.onDelta(delta.delta, 'text');
       } else if (delta?.type === "thinking_delta" && delta.delta) {
         this.currentRelay?.onDelta(delta.delta, 'thinking');
+      } else if (delta?.type === "error") {
+        const reason = delta.reason ?? "unknown";
+        console.error(`[pi] stream error: ${reason}`);
+        if (verbosity >= 2) {
+          console.error(`[pi] stream error JSON: ${JSON.stringify(event)}`);
+        }
+      }
+      return;
+    }
+
+    if (type === "message_end") {
+      const msg = (event as PiEvent).message;
+      if (msg?.stopReason === "error" && msg.errorMessage) {
+        console.error(`[pi] message error: ${msg.errorMessage}`);
+        if (verbosity >= 1) {
+          console.error(`[pi] error context: stopReason=${msg.stopReason}`);
+        }
+        this.lastPiError = msg.errorMessage;
       }
       return;
     }
@@ -263,10 +296,35 @@ export class Gateway {
     if (type === "agent_end") {
       dbg(1, `agent_end`);
       this.piStreaming = false;
-      this.currentRelay?.onDone().then(() => {
-        this.currentRelay = null;
-        this.processQueue();
-      });
+
+      const messages = (event as PiEvent).messages;
+      const errorMsg = messages?.find(m => m.stopReason === 'error')?.errorMessage;
+      if (errorMsg && !this.lastPiError) {
+        console.error(`[pi] agent error: ${errorMsg}`);
+        if (verbosity >= 1) {
+          console.error(`[pi] error context: messages=${messages?.length ?? 0}`);
+        }
+        this.lastPiError = errorMsg;
+      }
+
+      const hadContent = await this.currentRelay?.onDone();
+      if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId) {
+        try {
+          await this.api.editMessageText(
+            this.currentChatId,
+            this.currentPlaceholderMessageId,
+            `Error: ${this.lastPiError}`,
+          );
+        } catch (err) {
+          console.error(`[telegram] error edit failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      this.currentRelay = null;
+      this.lastPiError = undefined;
+      this.currentChatId = 0;
+      this.currentPlaceholderMessageId = 0;
+      this.processQueue();
       return;
     }
 
@@ -287,11 +345,13 @@ export class Gateway {
   ): Promise<void> {
     dbg(1, `startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
     this.piStreaming = true;
+    this.currentChatId = chatId;
+    this.lastPiError = undefined;
 
     const placeholder = await api.sendMessage(chatId, "...");
-    const messageId = placeholder.message_id;
+    this.currentPlaceholderMessageId = placeholder.message_id;
 
-    const editor = createSafeEditor(api, chatId, messageId, (msg) => dbg(1, msg));
+    const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg));
 
     this.currentRelay = createRelay({
       edit: (buf, isFinal) =>
@@ -318,6 +378,9 @@ export class Gateway {
     this.currentRelay = null;
     this.piStreaming = false;
     this.queue = [];
+    this.currentChatId = 0;
+    this.currentPlaceholderMessageId = 0;
+    this.lastPiError = undefined;
   }
 
   async showStatus(chatId: number | string, data: unknown): Promise<void> {

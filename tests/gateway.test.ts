@@ -176,13 +176,40 @@ describe("Gateway.handlePiEvent", () => {
     gateway.queue.push({ chatId: 123, text: "second" });
 
     // Simulate agent_end
-    gateway.handlePiEvent({ type: "agent_end" });
-
-    // Wait for async onDone + processQueue
-    await new Promise((r) => setTimeout(r, 50));
+    await gateway.handlePiEvent({ type: "agent_end" });
 
     expect(gateway.piStreaming).toBe(true); // second session started
     expect(gateway.queue.length).toBe(0);
+  });
+
+  it("bubbles Pi errors to Telegram when stream produces no content", async () => {
+    const edits: { chatId: number | string; messageId: number; text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async () => ({ message_id: 99 }),
+      editMessageText: async (chatId, messageId, text) => {
+        edits.push({ chatId, messageId, text });
+        return {};
+      },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    gateway.handlePiEvent({ type: "agent_start" });
+    gateway.handlePiEvent({ type: "turn_start" });
+    gateway.handlePiEvent({ type: "message_start" });
+    gateway.handlePiEvent({
+      type: "message_end",
+      message: { stopReason: "error", errorMessage: "provider validation failed" },
+    });
+    gateway.handlePiEvent({ type: "turn_end" });
+    await gateway.handlePiEvent({
+      type: "agent_end",
+      messages: [{ stopReason: "error", errorMessage: "provider validation failed" }],
+    });
+
+    expect(edits.length).toBe(1);
+    expect(edits[0]!.text).toBe("Error: provider validation failed");
+    expect(gateway.piStreaming).toBe(false);
   });
 });
 

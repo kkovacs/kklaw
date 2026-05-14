@@ -80,7 +80,7 @@ export function createRelay(opts: {
       currentText += text;
       scheduleEdit();
     },
-    async onDone(): Promise<void> {
+    async onDone(): Promise<boolean> {
       if (editTimer) {
         clearTimeout(editTimer);
         editTimer = null;
@@ -92,12 +92,13 @@ export function createRelay(opts: {
       const text = buildText();
       if (!text) {
         opts.log?.("finalize: empty buffer, nothing to edit");
-        return;
+        return false;
       }
       opts.log?.(`final edit len=${text.length} segs=${segments.length}`);
       await opts.edit(text, true).catch(() => {});
       segments = [];
       currentKind = 'text';
+      return true;
     },
 
     cancel(): void {

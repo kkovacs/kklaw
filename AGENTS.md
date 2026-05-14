@@ -9,15 +9,15 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Three files: `index.ts` (~200 lines, bot wiring + `Gateway` class), `relay.ts` (~80 lines, debounced streaming + formatting), `pi-client.ts` (~70 lines, subprocess + JSONL). Extracted for testability.
+Three files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL). Extracted for testability.
 
 ### Pipeline
 
 1. Telegram user sends a text message or slash command
 2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`
 3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi
-4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `editMessageText` with `parse_mode: "MarkdownV2"` debounced at 600ms
-5. On `agent_end` → final edit, clear state, process next queued message
+4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
+5. On `agent_end` → final edit, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
 
 #### Slash commands (Telegram → Pi RPC)
@@ -37,12 +37,22 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 - **JSONL framer is custom**: Node's `readline` is incompatible (splits on `U+2028`/`U+2029` which are valid in JSON strings). Custom `\n`-only splitter with optional `\r` strip.
 - **Debounced streaming**: editing Telegram messages per-character would hit rate limits. Buffer accumulates deltas, `editMessageText` fires every 600ms, final edit on `agent_end`.
 - **Thinking via blockquote**: `thinking_delta` events are streamed alongside `text_delta`. The relay interleaves segments, wrapping thinking content in `> ` prefix (MarkdownV2 blockquote) with special characters escaped.
+- **Robust Telegram editing (`createSafeEditor`)**: sits between `relay.ts` and the Telegram API. Handles three error classes:
+  - `MESSAGE_TOO_LONG` (4000 char limit) → rolls back to the last known good text, then `sendMessage`s the remainder in ≤4000-char chunks. Earlier chunks are "frozen"; streaming continues on the newest chunk.
+  - Parse errors during streaming (`!isFinal`) → skipped silently; `lastGoodTexts` is not updated. The next debounced edit retries with more text, which may complete broken markdown.
+  - Parse errors on final (`isFinal=true`) → falls back to plain text (no `parse_mode`) on the last message so the user at least sees raw text.
+  - Blockquote continuation: if `MESSAGE_TOO_LONG` splits mid-line inside a `>` blockquote, the remainder is prepended with `> ` so the new message continues the blockquote. This works because `relay.ts` escapes `>` in text segments, so any line starting with `>` is guaranteed to be thinking.
 - **MarkdownV2 with dual escape**: the entire message is sent with `parse_mode: "MarkdownV2"`. Two escape levels:
   - **Thinking**: strict escape (all reserved chars) → no accidental formatting inside `> ` blockquotes
   - **Text**: relaxed escape (`*`, `_`, `` ` `` pass through) → Pi's `**bold**`, `*italic*`, `` `code` `` render
   - Other reserved chars (`!`, `.`, `[`, `]`, `~`, etc.) are always escaped to prevent parse errors (400 Bad Request)
 - **Sequential processing**: pi handles one prompt at a time. Incoming messages while busy are queued FIFO.
 - **Pi restart on crash**: `exit` handler spawns a new pi process after 1s delay.
+- **Error bubbling**: Pi errors that produce no stream content are surfaced to the Telegram user by editing the placeholder message. Without this, the user sees a frozen `"..."` forever.
+- **Verbosity levels**:
+  - **No flag**: Pi errors always logged to stderr; nothing else.
+  - **`-v`**: events/states + terse error context (`stopReason=error`, `messages=3`, etc.).
+  - **`-vv`**: full JSON of every event (`[pi] event JSON: ...`) plus raw stdout lines (`pi stdout: ...`).
 - **`drop_pending_updates: true`**: avoids processing stale Telegram messages on restart.
 
 ### Known gaps (marked `XXX` in code)
@@ -52,6 +62,10 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 - Message queue is in-memory only — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
 - Other builtin slash commands (`/model`, `/compact`, `/fork`, etc.) not registered yet
+
+### Pi/provider gotcha
+
+Pi stores assistant `thinking` blocks with `thinkingSignature: "reasoning"` in the session history. When sending the history to providers using the `openai-completions` API (e.g. `opencode-go` / `kimi-k2.6`), Pi includes those `reasoning` fields in the messages array. Some providers reject them as extra/unknown inputs, producing a `400 Error from provider: Extra inputs are not permitted, field: 'messages[N].reasoning'` and an empty assistant response. The gateway now surfaces this error to the user instead of leaving a frozen placeholder. A `/new` session clears the history and temporarily fixes it.
 
 ## Configuration (`.env`)
 
@@ -87,18 +101,22 @@ bun test           # run tests
 **`Gateway` class** — all mutable state + business logic:
 
 - `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, ignores `/` commands, enqueues or starts a pi session.
-- `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `Relay`, sends `{"type":"prompt",...}` to pi.
-- `handlePiEvent(event)` — routes pi events:
+- `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt",...}` to pi.
+- `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
   - `response` — log success/error; routes `get_state` → `showStatus()` and `get_session_stats` → `showStats()` when `lastChatId` is set
   - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
   - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
-  - `agent_end` → `relay.onDone()`, then `processQueue()`
+  - `message_update` with `error` → logs to stderr immediately (always, even without `-v`)
+  - `message_end` with `stopReason === "error"` → captures `errorMessage` for later
+  - `agent_end` → `await relay.onDone()`. If relay produced no content and an error was captured, edits the placeholder message with the error text. Then `processQueue()`.
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
 - `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command.
 - `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking).
 - `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost).
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
+- `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
+- `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
 
 **Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, starts long polling. Not executed when imported for tests.
 
@@ -108,7 +126,7 @@ bun test           # run tests
 
 Pure function. Holds `segments`, `currentKind`, `currentText` and `editTimer` in closure.
 - `onDelta(text, kind?)` — appends to current segment. On kind change (`'text'` ↔ `'thinking'`), pushes current to `segments[]` and starts a new one. Schedules debounced `edit()` call (default 600ms).
-- `onDone()` — cancels timer, finalizes last segment, builds MarkdownV2 string: thinking segments → strict escape (`escapeMdV2`) + `> ` prefix per line; text segments → relaxed escape (`escapeText`, lets `*` `_` `` ` `` through). Clears all state.
+- `onDone()` — cancels timer, finalizes last segment, builds MarkdownV2 string: thinking segments → strict escape (`escapeMdV2`) + `> ` prefix per line; text segments → relaxed escape (`escapeText`, lets `*` `_` `` ` `` through). Calls `edit(text, true)` so `createSafeEditor` knows this is the final edit and can fall back to plain text on parse errors. Returns `Promise<boolean>`: `true` if content was edited, `false` if buffer was empty. Clears all state.
 - `cancel()` — clears timer and all segments/buffer without a final edit. Used by `resetSession()` before `/new`.
 
 ### `pi-client.ts`
@@ -125,7 +143,7 @@ Spawns subprocess with `stdio: ['pipe','pipe','pipe']`. Reads stdout via custom 
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `handlePiEvent` routing for `get_state`/`get_session_stats`, fixture replay for status/context |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `handlePiEvent` routing for `get_state`/`get_session_stats`, fixture replay for status/context; **Pi error bubbling when stream produces no content** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl` for command integration tests |
 
@@ -138,7 +156,8 @@ Telegram message
     → [if busy] queue.push() + ctx.reply("Queued.")
     → [if idle] Gateway.startPiSession()
       → api.sendMessage("...")
-      → createRelay({ edit: api.editMessageText })
+      → createSafeEditor(api, chatId, messageId)
+        → createRelay({ edit: (buf, isFinal) => editor.edit(buf, isFinal) })
       → sendPi({ type: "prompt", message: text })
 
 Telegram command (e.g. /status)
@@ -158,9 +177,15 @@ pi stdout
       → [response] → log success/error; route get_state/get_session_stats
       → [text_delta] → relay.onDelta(delta, 'text')
       → [thinking_delta] → relay.onDelta(delta, 'thinking')
-        → [debounce 600ms] → api.editMessageText(buf, { parse_mode: "MarkdownV2" })
-      → [agent_end] → relay.onDone()
-        → api.editMessageText(final, { parse_mode: "MarkdownV2" })
+        → [debounce 600ms] → createSafeEditor.edit(buf)
+          → [OK] → api.editMessageText(lastMsg, buf, { parse_mode: "MarkdownV2" })
+          → [too long] → rollback + api.sendMessage(chunks, { parse_mode: "MarkdownV2" })
+          → [parse error, streaming] → skip, retry later
+      → [agent_end] → await relay.onDone() → boolean hadContent
+        → [hadContent=true] → createSafeEditor.edit(final, isFinal=true)
+          → [OK] → api.editMessageText(lastMsg, final, { parse_mode: "MarkdownV2" })
+          → [parse error, final] → api.editMessageText(lastMsg, final) // plain text
+        → [hadContent=false && lastPiError] → api.editMessageText(placeholder, `Error: ${lastPiError}`)
         → Gateway.processQueue()
           → [if queued] Gateway.startPiSession(next)
 ```
@@ -202,14 +227,14 @@ pi stdout
 - grammy MarkdownV2: https://core.telegram.org/bots/api#markdownv2-style
 - Bun docs: https://bun.sh/docs
 
-
 ## Guidelines for working with the User:
 
 - User comes from a C and bash programming background, so prefers clean, minimalist solutions and small, precise code changes.
 - Simple is beautiful. Every bit of complexity that is added needs to justify its existence.
-- In coding, things that belong together should be **kept close together**: same file when possible, or similar directory, filename, function name, field name, etc. When parts have been separated for any reason, they should carry comments stating what calls/uses them, so the flow is clear for future reference.
-- First we **plan** together. Afer we have a plan we agree on, User will say "*go hot*" and then you can execute only the **steps agreed on**.
-- User likes to progress in small steps. **Don't rush ahead**, don't create/develop anything that was not asked, only **suggest** what you would do next.
+- Things that belong together should be **kept close together** in the codebase: same file when possible, or at least similar directory, filename, function name, field name, etc. - When parts have been separated for any reason, they should carry comments stating what calls/uses them, so the flow is clear for future reference.
 - **Premature** abstractions are the **root of all evil**, but consolidation is preferable to writing the same code over and over.
+- First we **plan** together. Afer we have a plan we agree on, User will say "*go hot*" and then you can execute **only the steps agreed on**.
+- User likes to progress in small steps. **Don't rush ahead**, don't start creating anything that was not asked for, only **suggest** what you would do next.
+- Don't update the tests **before** the functionality we are working on has been confirmed working by User. It's wasteful and confusing in case further changes are needed.
 - Technical debt, temporary solutions, unhandled errors are OK in WIP, but **must** be marked with `XXX` comments.
 - **Do not** do any `git` operations without User's explicit request.
