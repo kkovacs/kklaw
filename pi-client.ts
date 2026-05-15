@@ -61,6 +61,7 @@ export function createPiClient(options: {
     try {
       event = JSON.parse(line);
     } catch {
+      console.error(`[pi] malformed JSON line: ${line.slice(0, 200)}`);
       return;
     }
     options.onEvent(event);
@@ -76,7 +77,9 @@ export function createPiClient(options: {
         return;
       }
       const raw = JSON.stringify(cmd);
-      proc.stdin.write(raw + "\n");
+      proc.stdin.write(raw + "\n", (err) => {
+        if (err) console.error(`[pi] stdin write failed: ${err.message}`);
+      });
     },
     close(): void {
       proc.kill();

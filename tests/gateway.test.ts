@@ -398,7 +398,7 @@ describe("Gateway.handlePiEvent", () => {
     gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
     expect(gateway.turnToolCounts.size).toBe(1);
 
-    gateway.resetSession();
+    gateway.resetSession("test");
     expect(gateway.turnToolCounts.size).toBe(0);
   });
 
@@ -727,7 +727,7 @@ describe("Gateway.resetSession", () => {
     await gateway.startPiSession(123, "active");
     expect(gateway.currentRelay).not.toBeNull();
 
-    gateway.resetSession();
+    gateway.resetSession("test");
 
     expect(gateway.piStreaming).toBe(false);
     expect(gateway.queue.length).toBe(0);

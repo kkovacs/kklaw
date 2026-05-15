@@ -178,7 +178,7 @@ export class Gateway {
               console.error(`[delete] unlink failed: ${err?.message ?? err}`);
             }
           }
-          this.resetSession();
+          this.resetSession("/delete");
           this.sendPi({ type: "new_session" });
           try {
             await this.api.sendMessage(chatId, "🗑️ Session deleted. 🆕 New session started.");
@@ -258,6 +258,9 @@ export class Gateway {
       }
 
       const hadContent = await this.currentRelay?.onDone();
+      if (hadContent && this.lastPiError) {
+        dbg(1, `agent ended with error but content was produced: ${this.lastPiError}`);
+      }
       if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId) {
         try {
           await this.api.editMessageText(
@@ -313,13 +316,20 @@ export class Gateway {
     const now = Date.now();
     if (now - this.lastTypingSent < 4000) return;
     this.lastTypingSent = now;
-    this.api.sendChatAction?.(chatId, "typing")?.catch(() => {});
+    dbg(1, `typing → ${chatId}`);
+    this.api.sendChatAction?.(chatId, "typing")?.catch((err: Error) => {
+      console.error(`[telegram] sendChatAction failed: ${err.message}`);
+    });
   }
 
   sendPi(cmd: Record<string, unknown>): void {
     const raw = JSON.stringify(cmd);
     dbg(2, `sendPi: ${raw}`);
-    this.piClient?.send(cmd);
+    if (!this.piClient) {
+      console.error(`[pi] cannot send command (pi not connected): ${raw.slice(0, 200)}`);
+      return;
+    }
+    this.piClient.send(cmd);
   }
 
   async startPiSession(
@@ -338,7 +348,15 @@ export class Gateway {
     this.currentChatId = chatId;
     this.lastPiError = undefined;
 
-    const placeholder = await api.sendMessage(chatId, "...");
+    let placeholder: { message_id: number };
+    try {
+      placeholder = await api.sendMessage(chatId, "...");
+    } catch (err) {
+      this.piStreaming = false;
+      this.currentChatId = 0;
+      console.error(`[telegram] failed to send placeholder (chat=${chatId}): ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     this.currentPlaceholderMessageId = placeholder.message_id;
 
     const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg), this.rawMode);
@@ -365,8 +383,8 @@ export class Gateway {
     this.startPiSession(next.chatId, next.text, api, next.images);
   }
 
-  resetSession(): void {
-    dbg(1, "resetSession");
+  resetSession(caller: string): void {
+    dbg(1, `resetSession (${caller})`);
     this.currentRelay?.cancel();
     this.currentRelay = null;
     this.piStreaming = false;
@@ -400,7 +418,7 @@ export class Gateway {
     }
 
     dbg(1, `switchToSession: ${info.id} -> ${info.path}`);
-    this.resetSession();
+    this.resetSession("switchToSession");
     this.sendPi({ type: "switch_session", sessionPath: info.path });
   }
 
@@ -742,27 +760,32 @@ if (import.meta.main) {
   bot.filter((ctx) => ctx.from?.id === allowedUserId);
 
   bot.command("new", async (ctx) => {
-    gateway.resetSession();
+    dbg(1, "/new");
+    gateway.resetSession("/new");
     gateway.sendPi({ type: "new_session" });
     await ctx.reply("🆕 New session.");
   });
 
   bot.command("status", async (ctx) => {
+    dbg(1, "/status");
     await gateway.showDaemonStatus(ctx.chatId);
   });
 
   bot.command("session", async (ctx) => {
+    dbg(1, "/session");
     gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_state" });
     gateway.sendPi({ type: "get_session_stats" });
   });
 
   bot.command("last", async (ctx) => {
+    dbg(1, "/last");
     gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_last_assistant_text" });
   });
 
   bot.command("showthink", async (ctx) => {
+    dbg(1, "/showthink");
     const kb = new InlineKeyboard()
       .text(gateway.showThinking ? "✅ Yes" : "Yes", "showthink:yes")
       .text(gateway.showThinking ? "No" : "✅ No", "showthink:no");
@@ -788,6 +811,7 @@ if (import.meta.main) {
   });
 
   bot.command("showtools", async (ctx) => {
+    dbg(1, "/showtools");
     const kb = new InlineKeyboard()
       .text(gateway.showTools ? "✅ On" : "On", "showtools:on")
       .text(gateway.showTools ? "Off" : "✅ Off", "showtools:off");
@@ -813,6 +837,7 @@ if (import.meta.main) {
   });
 
   bot.command("showraw", async (ctx) => {
+    dbg(1, "/showraw");
     const kb = new InlineKeyboard()
       .text(gateway.rawMode ? "✅ Raw" : "Raw", "showraw:on")
       .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "showraw:off");
@@ -838,7 +863,7 @@ if (import.meta.main) {
   });
 
   bot.command("name", async (ctx) => {
-
+    dbg(1, "/name");
     const name = ctx.match?.trim();
     if (!name) {
       await ctx.reply("ℹ️ Usage: /name <name>");
@@ -850,13 +875,14 @@ if (import.meta.main) {
   });
 
   bot.command("delete", async (ctx) => {
+    dbg(1, "/delete");
     gateway.deleteRequestChatId = ctx.chatId;
     gateway.sendPi({ type: "get_state" });
     await ctx.reply("🗑️ Deleting session...");
   });
 
   bot.command("resume", async (ctx) => {
-
+    dbg(1, "/resume");
     const sessions = gateway.scanRecentSessions();
 
     if (sessions.length === 0) {
@@ -899,11 +925,13 @@ if (import.meta.main) {
   });
 
   bot.command("quit", async (ctx) => {
+    dbg(1, "/quit");
     await ctx.reply("👋 Bye!");
     process.exit(0);
   });
 
   bot.command("model", async (ctx) => {
+    dbg(1, "/model");
     const filter = ctx.match?.trim();
     gateway.modelFilter = filter || undefined;
     gateway.lastChatId = ctx.chatId;
@@ -958,7 +986,9 @@ if (import.meta.main) {
     { command: "name",      description: "Set a display name for the current session" },
     { command: "model",     description: "List / filter available models, or switch model" },
     { command: "quit",      description: "Exit the daemon" },
-  ]);
+  ]).catch((err: Error) => {
+    console.error(`[cmd] setMyCommands failed: ${err.message}`);
+  });
 
 
   spawnPi();

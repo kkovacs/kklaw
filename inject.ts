@@ -51,7 +51,11 @@ export class InjectWatcher {
         // Delete BEFORE calling onPrompt — if injection crashes, file is already consumed
         await this.tryUnlink(filepath);
 
-        this.onPrompt(text.trim(), name);
+        try {
+          this.onPrompt(text.trim(), name);
+        } catch (err) {
+          console.error(`[inject] onPrompt threw for ${name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     } catch (err) {
       console.error(`[inject] scan error: ${err instanceof Error ? err.message : String(err)}`);

@@ -59,7 +59,9 @@ export function createRelay(opts: {
   function doEdit(): void {
     const text = buildText();
     if (!text) return;
-    opts.edit(text).catch(() => {});
+    opts.edit(text).catch((err) => {
+      opts.log?.(`mid-stream edit failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   function scheduleEdit(): void {
