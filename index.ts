@@ -5,7 +5,7 @@ import { unlink } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
-import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, type TelegramApi, type MessageContext, type PhotoMessageContext } from "./telegram";
+import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
 
 // ============================================================
@@ -61,6 +61,7 @@ interface PiEvent {
     reason?: string;
   };
   message?: {
+    role?: string;
     stopReason?: string;
     errorMessage?: string;
   };
@@ -108,6 +109,7 @@ export class Gateway {
   currentChatId: number | string = 0;
   currentPlaceholderMessageId: number = 0;
   lastPiError?: string;
+  piErrorSent = false;
   turnToolCounts: Map<string, number> = new Map();
   lastTypingSent = 0;
   deleteRequestChatId: number | string = 0;
@@ -224,6 +226,33 @@ export class Gateway {
       return;
     }
 
+    if (type === "message_start") {
+      const msg = (event as PiEvent).message;
+      if (msg?.role === "assistant" && this.currentChatId) {
+        if (this.currentRelay) {
+          await this.currentRelay.onDone();
+          this.currentRelay = null;
+        }
+        let placeholder: { message_id: number };
+        try {
+          placeholder = await this.api.sendMessage(this.currentChatId, "...");
+        } catch (err) {
+          console.error(`[telegram] failed to send message (chat=${this.currentChatId}): ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+        this.currentPlaceholderMessageId = placeholder.message_id;
+        const editor = createSafeEditor(this.api, this.currentChatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg));
+        this.currentRelay = createRelay({
+          edit: (buf, isFinal) =>
+            editor.edit(buf, isFinal).catch((err: Error) =>
+              console.error(`[telegram] edit failed: ${err.message}`),
+            ),
+          log: (msg) => dbg(1, msg),
+        });
+      }
+      return;
+    }
+
     if (type === "message_end") {
       const msg = (event as PiEvent).message;
       if (msg?.stopReason === "error" && msg.errorMessage) {
@@ -232,6 +261,26 @@ export class Gateway {
           console.error(`[pi] error context: stopReason=${msg.stopReason}`);
         }
         this.lastPiError = msg.errorMessage;
+      }
+      if (this.currentRelay) {
+        const hadContent = await this.currentRelay.onDone();
+        if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId && !this.piErrorSent) {
+          try {
+            await this.api.editMessageText(
+              this.currentChatId,
+              this.currentPlaceholderMessageId,
+              `❌ Error: ${this.lastPiError}`,
+            );
+            this.piErrorSent = true;
+          } catch (err) {
+            console.error(`[telegram] error edit failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else if (!hadContent && this.currentChatId && this.currentPlaceholderMessageId) {
+          this.api.deleteMessage?.(this.currentChatId, this.currentPlaceholderMessageId)?.catch((err: Error) => {
+            dbg(1, `[telegram] delete stale placeholder failed: ${err.message}`);
+          });
+        }
+        this.currentRelay = null;
       }
       return;
     }
@@ -254,13 +303,14 @@ export class Gateway {
       if (hadContent && this.lastPiError) {
         dbg(1, `agent ended with error but content was produced: ${this.lastPiError}`);
       }
-      if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId) {
+      if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId && !this.piErrorSent) {
         try {
           await this.api.editMessageText(
             this.currentChatId,
             this.currentPlaceholderMessageId,
             `❌ Error: ${this.lastPiError}`,
           );
+          this.piErrorSent = true;
         } catch (err) {
           console.error(`[telegram] error edit failed: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -281,6 +331,7 @@ export class Gateway {
 
       this.currentRelay = null;
       this.lastPiError = undefined;
+      this.piErrorSent = false;
       this.currentChatId = 0;
       this.currentPlaceholderMessageId = 0;
       this.processQueue();
@@ -327,35 +378,11 @@ export class Gateway {
     images?: ImageContent[],
   ): Promise<void> {
     dbg(1, `startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" images=${images?.length ?? 0}`);
-    // piStreaming guards against reentrant startPiSession() from Telegram
-    // messages arriving during the async sendMessage below. currentRelay
-    // is created after the await, but Pi can't emit text_delta until it
-    // receives the prompt command at the end of this function — the
-    // null-relay window is harmless.
     this.piStreaming = true;
     this.currentChatId = chatId;
     this.lastPiError = undefined;
-
-    let placeholder: { message_id: number };
-    try {
-      placeholder = await api.sendMessage(chatId, "...");
-    } catch (err) {
-      this.piStreaming = false;
-      this.currentChatId = 0;
-      console.error(`[telegram] failed to send placeholder (chat=${chatId}): ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-    this.currentPlaceholderMessageId = placeholder.message_id;
-
-    const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg));
-
-    this.currentRelay = createRelay({
-      edit: (buf, isFinal) =>
-        editor.edit(buf, isFinal).catch((err: Error) =>
-          console.error(`[telegram] edit failed: ${err.message}`),
-        ),
-      log: (msg) => dbg(1, msg),
-    });
+    this.piErrorSent = false;
+    this.currentPlaceholderMessageId = 0;
 
     const cmd: Record<string, unknown> = { type: "prompt", message: text };
     if (images && images.length > 0) cmd.images = images;
@@ -380,6 +407,7 @@ export class Gateway {
     this.currentChatId = 0;
     this.currentPlaceholderMessageId = 0;
     this.lastPiError = undefined;
+    this.piErrorSent = false;
   }
 
   scanRecentSessions(limit: number = 8, sessionDir?: string): SessionInfo[] {
@@ -676,6 +704,48 @@ export class Gateway {
 
     await this.startPiSession(ctx.chatId, text, api, images);
   }
+
+  async handleDocumentMessage(
+    ctx: DocumentMessageContext,
+    api: TelegramApi = this.api,
+  ): Promise<void> {
+    const userId = ctx.from?.id;
+    dbg(1, `message:document from user=${userId} chat=${ctx.chatId} caption="${ctx.msg.caption?.slice(0, 80) ?? ""}"`);
+
+    if (userId === undefined || userId !== this.allowedUserId) {
+      dbg(1, `rejected user ${userId} (allowed: ${this.allowedUserId})`);
+      return;
+    }
+
+    const doc = ctx.msg.document;
+    if (!doc?.file_id) return;
+    if (!doc.mime_type?.startsWith("image/")) return;
+
+    const text = ctx.msg.caption ?? "";
+
+    if (verbosity >= 2) {
+      dbg(2, `telegram document msg: ${JSON.stringify({ userId, chatId: ctx.chatId, caption: text, mimeType: doc.mime_type })}`);
+    }
+
+    let images: ImageContent[];
+    try {
+      const buffer = await this.downloadFile(doc.file_id);
+      images = [{ type: "image", data: buffer.toString("base64"), mimeType: doc.mime_type }];
+    } catch (err) {
+      console.error(`[telegram] document download failed: ${err instanceof Error ? err.message : String(err)}`);
+      await ctx.reply("Failed to download document.");
+      return;
+    }
+
+    if (this.piStreaming) {
+      dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
+      this.queue.push({ chatId: ctx.chatId, text, images });
+      await ctx.reply("⏳ Queued.");
+      return;
+    }
+
+    await this.startPiSession(ctx.chatId, text, api, images);
+  }
 }
 
 // ============================================================
@@ -859,6 +929,11 @@ if (import.meta.main) {
   bot.on("message:photo", async (ctx) => {
     // grammy context satisfies PhotoMessageContext (has photo[], optional caption)
     await gateway.handlePhotoMessage(ctx as unknown as PhotoMessageContext, ctx.api);
+  });
+
+  bot.on("message:document", async (ctx) => {
+    // grammy context satisfies DocumentMessageContext (has document.file_id, document.mime_type, optional caption)
+    await gateway.handleDocumentMessage(ctx as unknown as DocumentMessageContext, ctx.api);
   });
 
   // Clear any chat-scoped commands from other bots (chat-scope overrides global scope)

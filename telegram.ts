@@ -7,6 +7,7 @@ export interface TelegramApi {
   editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
   sendChatAction(chatId: number | string, action: string): Promise<unknown>;
   getFile(fileId: string): Promise<{ file_path?: string }>;
+  deleteMessage?(chatId: number | string, messageId: number): Promise<unknown>;
 }
 
 export async function downloadTelegramFile(
@@ -44,6 +45,20 @@ export interface PhotoMessageContext {
   msg: {
     caption?: string;
     photo: PhotoSize[];
+  };
+  reply(text: string): Promise<unknown>;
+}
+
+export interface DocumentMessageContext {
+  chatId: number | string;
+  from?: { id: number };
+  msg: {
+    caption?: string;
+    document?: {
+      file_id: string;
+      mime_type?: string;
+      file_name?: string;
+    };
   };
   reply(text: string): Promise<unknown>;
 }

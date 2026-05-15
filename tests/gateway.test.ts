@@ -13,6 +13,7 @@ function mockApi(): TelegramApi {
     editMessageText: async () => ({}),
     sendChatAction: async () => ({}),
     getFile: async () => ({ file_path: "test/photo.jpg" }),
+    deleteMessage: async () => ({}),
   };
 }
 
@@ -66,7 +67,6 @@ describe("Gateway.handleTextMessage", () => {
 
     expect(gateway.piStreaming).toBe(true);
     expect(gateway.queue.length).toBe(0);
-    expect(gateway.currentRelay).not.toBeNull();
   });
 
   it("queues message and replies 'Queued.' when pi is busy", async () => {
@@ -93,7 +93,6 @@ describe("Gateway.handleTextMessage", () => {
     await gateway.handleTextMessage(ctx, api);
 
     expect(gateway.piStreaming).toBe(true);
-    expect(gateway.currentRelay).not.toBeNull();
   });
 });
 
@@ -216,6 +215,8 @@ describe("Gateway.handlePiEvent", () => {
     });
 
     await gateway.startPiSession(123, "test");
+
+    await gateway.handlePiEvent({ type: "message_start", message: { role: "assistant" } });
     expect(gateway.currentRelay).not.toBeNull();
 
     gateway.handlePiEvent({
@@ -226,7 +227,7 @@ describe("Gateway.handlePiEvent", () => {
     // Debounce hasn't fired yet
     expect(edits).toEqual([]);
 
-    // Force flush by calling onDone (simulates agent_end)
+    // Force flush by calling onDone (simulates message_end)
     await gateway.currentRelay!.onDone();
     expect(edits).toEqual(["hi"]);
   });
@@ -357,8 +358,8 @@ describe("Gateway.handlePiEvent", () => {
 
     gateway.handlePiEvent({ type: "agent_start" });
     gateway.handlePiEvent({ type: "turn_start" });
-    gateway.handlePiEvent({ type: "message_start" });
-    gateway.handlePiEvent({
+    await gateway.handlePiEvent({ type: "message_start", message: { role: "assistant" } });
+    await gateway.handlePiEvent({
       type: "message_end",
       message: { stopReason: "error", errorMessage: "provider validation failed" },
     });
@@ -578,10 +579,10 @@ describe("Integration: replay recorded fixture", () => {
       } catch {
         continue;
       }
-      gateway.handlePiEvent(event as Parameters<typeof gateway.handlePiEvent>[0]);
+      await gateway.handlePiEvent(event as Parameters<typeof gateway.handlePiEvent>[0]);
     }
 
-    // Wait for async onDone + processQueue after agent_end
+    // Wait for any remaining async work after agent_end
     await new Promise((r) => setTimeout(r, 50));
 
     expect(gateway.piStreaming).toBe(false);
@@ -609,7 +610,7 @@ describe("Gateway.resetSession", () => {
     gateway.piStreaming = true;
     gateway.queue.push({ chatId: 123, text: "pending" });
     await gateway.startPiSession(123, "active");
-    expect(gateway.currentRelay).not.toBeNull();
+    expect(gateway.currentRelay).toBeNull();
 
     gateway.resetSession("test");
 
