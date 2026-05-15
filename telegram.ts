@@ -52,21 +52,6 @@ export function createSafeEditor(
     return msg.includes("message_too_long") || msg.includes("message is too long");
   }
 
-  function splitTelegramText(text: string, maxLen = 4000): string[] {
-    if (text.length <= maxLen) return [text];
-    const chunks: string[] = [];
-    let remaining = text;
-    while (remaining.length > maxLen) {
-      let cut = remaining.lastIndexOf("\n", maxLen);
-      if (cut < maxLen * 0.5) cut = remaining.lastIndexOf(" ", maxLen);
-      if (cut < maxLen * 0.5) cut = maxLen;
-      chunks.push(remaining.slice(0, cut).trimEnd());
-      remaining = remaining.slice(cut).trimStart();
-    }
-    if (remaining) chunks.push(remaining);
-    return chunks.length > 0 ? chunks : [""];
-  }
-
   async function rollbackLastMessage(messageId: number, goodText: string): Promise<void> {
     try {
       await api.editMessageText(chatId, messageId, goodText, mdOpts);
@@ -170,7 +155,22 @@ export function createSafeEditor(
   };
 }
 
-function htmlEscape(s: string): string {
+export function splitTelegramText(text: string, maxLen = 4000): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let cut = remaining.lastIndexOf("\n", maxLen);
+    if (cut < maxLen * 0.5) cut = remaining.lastIndexOf(" ", maxLen);
+    if (cut < maxLen * 0.5) cut = maxLen;
+    chunks.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks.length > 0 ? chunks : [""];
+}
+
+export function htmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 

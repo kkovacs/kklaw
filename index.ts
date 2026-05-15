@@ -5,7 +5,7 @@ import { unlink } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
-import { createSafeEditor, formatToolCall, type TelegramApi, type MessageContext } from "./telegram";
+import { createSafeEditor, formatToolCall, htmlEscape, splitTelegramText, type TelegramApi, type MessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
 
 // ============================================================
@@ -107,6 +107,7 @@ export class Gateway {
   lastTypingSent = 0;
   showTools = false;
   deleteRequestChatId: number | string = 0;
+  bashRequestChatId: number | string = 0;
   sessionPicker: Map<string, SessionInfo> = new Map();
   modelFilter?: string;
   allowedUserId: number;
@@ -183,6 +184,19 @@ export class Gateway {
         }
         if (resp.command === "get_available_models" && this.lastChatId) {
           this.showModels(this.lastChatId, resp.data);
+        }
+        if (resp.command === "bash" && this.bashRequestChatId) {
+          const chatId = this.bashRequestChatId;
+          this.bashRequestChatId = 0;
+          const d = resp.data as { output?: string; exitCode?: number; truncated?: boolean } | undefined;
+          const header = `Exit code: ${d?.exitCode ?? "?"}${d?.truncated ? " (truncated)" : ""}`;
+          const output = d?.output ?? "(no output)";
+          const combined = `${header}\n\n${output}`;
+          const chunks = splitTelegramText(combined, 3900);
+          for (const chunk of chunks) {
+            await this.api.sendMessage(chatId, `<pre>${htmlEscape(chunk)}</pre>`, { parse_mode: "HTML" })
+              .catch((err: Error) => console.error(`[telegram] bash result failed: ${err.message}`));
+          }
         }
       }
       return;
@@ -576,6 +590,17 @@ export class Gateway {
 
     if (verbosity >= 2) {
       dbg(2, `telegram msg: ${JSON.stringify({ userId, chatId: ctx.chatId, text })}`);
+    }
+
+    if (text.startsWith("!")) {
+      const command = text.slice(1).trim();
+      if (!command) {
+        await ctx.reply("Usage: !&lt;command&gt;", { parse_mode: "HTML" });
+        return;
+      }
+      this.bashRequestChatId = ctx.chatId;
+      this.sendPi({ type: "bash", command });
+      return;
     }
 
     if (this.piStreaming) {
