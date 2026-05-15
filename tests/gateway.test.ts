@@ -1,6 +1,10 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeAll } from "bun:test";
+import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Gateway, type TelegramApi, type MessageContext } from "../index";
 import { loadFixtureLines, extractTextDeltas } from "./helpers";
+import type { PiClient } from "../pi-client";
 
 function mockApi(): TelegramApi {
   return {
@@ -635,5 +639,215 @@ describe("Integration: replay command responses", () => {
     expect(messages[0]!.other).toBeUndefined();
     expect(messages[0]!.text).toContain("Got it, just testing the waters.");
     expect(messages[0]!.text).toContain("Ready when you need me for anything kklaw-related!");
+  });
+});
+
+// ============================================================
+// Session fixture helpers
+// ============================================================
+
+function writeSessionFile(dir: string, relPath: string, lines: string[], mtime: Date): void {
+  const path = join(dir, relPath);
+  const parent = join(path, "..");
+  mkdirSync(parent, { recursive: true });
+  writeFileSync(path, lines.map((l) => l + "\n").join(""));
+  utimesSync(path, mtime, mtime);
+}
+
+function setupSessionFixtures(): string {
+  const dir = mkdtempSync(join(tmpdir(), "kklaw-test-sessions-"));
+
+  // Session 1: named "fix-auth-bug", newest
+  writeSessionFile(dir, "2026-04-12T15-40-00-000Z_01999999-1111-7aaa-bbbb-ccccddddeeee.jsonl", [
+    '{"type":"session","version":3,"id":"01999999-1111-7aaa-bbbb-ccccddddeeee","timestamp":"2026-04-12T15:40:00.000Z","cwd":"/home/user/proj1"}',
+    '{"type":"session_info","id":"a1b2c3d4","parentId":null,"timestamp":"2026-04-12T15:41:00.000Z","name":"fix-auth-bug"}',
+    '{"type":"message","id":"e5f6a7b8","parentId":null,"timestamp":"2026-04-12T15:40:01.000Z","message":{"role":"user","content":"fix the auth bug"}}',
+  ], new Date(2026, 3, 12, 15, 40));
+
+  // Session 2: unnamed
+  writeSessionFile(dir, "2026-04-11T09-15-00-000Z_01999999-2222-7aaa-bbbb-ccccddddffff.jsonl", [
+    '{"type":"session","version":3,"id":"01999999-2222-7aaa-bbbb-ccccddddffff","timestamp":"2026-04-11T09:15:00.000Z","cwd":"/home/user/proj1"}',
+    '{"type":"message","id":"b2c3d4e5","parentId":null,"timestamp":"2026-04-11T09:15:01.000Z","message":{"role":"user","content":"hello"}}',
+  ], new Date(2026, 3, 11, 9, 15));
+
+  // Session 3: named "refactor", oldest
+  writeSessionFile(dir, "2026-04-10T08-00-00-000Z_01999999-3333-7aaa-bbbb-ccccddddgggg.jsonl", [
+    '{"type":"session","version":3,"id":"01999999-3333-7aaa-bbbb-ccccddddgggg","timestamp":"2026-04-10T08:00:00.000Z","cwd":"/home/user/proj2"}',
+    '{"type":"session_info","id":"f6a7b8c9","parentId":null,"timestamp":"2026-04-10T08:01:00.000Z","name":"refactor"}',
+    '{"type":"message","id":"c3d4e5f6","parentId":null,"timestamp":"2026-04-10T08:00:01.000Z","message":{"role":"user","content":"refactor the module"}}',
+  ], new Date(2026, 3, 10, 8, 0));
+
+  // Session 4: unnamed, in subdir (recursion test)
+  writeSessionFile(dir, "subdir/2026-04-09T12-00-00-000Z_01999999-4444-7aaa-bbbb-ccccddddhhhh.jsonl", [
+    '{"type":"session","version":3,"id":"01999999-4444-7aaa-bbbb-ccccddddhhhh","timestamp":"2026-04-09T12:00:00.000Z","cwd":"/home/user/proj3"}',
+    '{"type":"message","id":"d4e5f6a7","parentId":null,"timestamp":"2026-04-09T12:00:01.000Z","message":{"role":"user","content":"work in subdir"}}',
+  ], new Date(2026, 3, 9, 12, 0));
+
+  // Bogus file: no session header, should be filtered out
+  writeSessionFile(dir, "bogus.jsonl", [
+    '{"type":"not-a-session","foo":"bar"}',
+  ], new Date(2026, 3, 13, 0, 0));
+
+  return dir;
+}
+
+// ============================================================
+// Session scanning tests
+// ============================================================
+
+describe("Gateway.scanRecentSessions", () => {
+  it("returns sessions sorted by mtime (newest first), extracts names, filters invalid files", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    const sessionsDir = setupSessionFixtures();
+
+    const sessions = gateway.scanRecentSessions(10, sessionsDir);
+
+    expect(sessions.length).toBe(4);
+
+    expect(sessions[0]!.id).toBe("01999999-1111-7aaa-bbbb-ccccddddeeee");
+    expect(sessions[0]!.name).toBe("fix-auth-bug");
+    expect(sessions[0]!.created).toBe("2026-04-12T15:40:00.000Z");
+
+    expect(sessions[1]!.id).toBe("01999999-2222-7aaa-bbbb-ccccddddffff");
+    expect(sessions[1]!.name).toBeUndefined();
+
+    expect(sessions[2]!.id).toBe("01999999-3333-7aaa-bbbb-ccccddddgggg");
+    expect(sessions[2]!.name).toBe("refactor");
+
+    expect(sessions[3]!.id).toBe("01999999-4444-7aaa-bbbb-ccccddddhhhh");
+    expect(sessions[3]!.name).toBeUndefined();
+  });
+
+  it("populates sessionPicker map", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    const sessionsDir = setupSessionFixtures();
+
+    gateway.scanRecentSessions(10, sessionsDir);
+
+    expect(gateway.sessionPicker.size).toBe(4);
+    const info = gateway.sessionPicker.get("01999999-1111-7aaa-bbbb-ccccddddeeee");
+    expect(info).not.toBeUndefined();
+    expect(info!.name).toBe("fix-auth-bug");
+    expect(info!.path).toContain("01999999-1111-7aaa-bbbb-ccccddddeeee.jsonl");
+  });
+
+  it("handles empty directory", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    const emptyDir = mkdtempSync(join(tmpdir(), "kklaw-test-empty-"));
+
+    const sessions = gateway.scanRecentSessions(10, emptyDir);
+
+    expect(sessions.length).toBe(0);
+    expect(gateway.sessionPicker.size).toBe(0);
+  });
+
+  it("handles nonexistent directory", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const sessions = gateway.scanRecentSessions(10, "/nonexistent/path/xyz");
+
+    expect(sessions.length).toBe(0);
+    expect(gateway.sessionPicker.size).toBe(0);
+  });
+});
+
+// ============================================================
+// Session switching tests
+// ============================================================
+
+describe("Gateway.switchToSession", () => {
+  it("sends switch_session RPC when session is in picker", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    const sessionsDir = setupSessionFixtures();
+
+    const piCommands: Record<string, unknown>[] = [];
+    const mockPi: PiClient = {
+      pid: 1,
+      send(cmd) { piCommands.push(cmd); },
+      close() {},
+    };
+    gateway.piClient = mockPi;
+
+    gateway.scanRecentSessions(10, sessionsDir);
+    const sessionId = "01999999-2222-7aaa-bbbb-ccccddddffff";
+
+    gateway.switchToSession(sessionId);
+
+    expect(piCommands.length).toBe(1);
+    expect(piCommands[0]).toEqual({
+      type: "switch_session",
+      sessionPath: expect.stringContaining("01999999-2222-7aaa-bbbb-ccccddddffff.jsonl"),
+    });
+  });
+
+  it("does nothing when session is not in picker", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.piClient = {
+      pid: 1,
+      send(cmd) { piCommands.push(cmd); },
+      close() {},
+    };
+
+    gateway.switchToSession("nonexistent-id");
+
+    expect(piCommands.length).toBe(0);
+  });
+});
+
+// ============================================================
+// Integration: session switch then /last
+// ============================================================
+
+describe("Integration: /resume then /last", () => {
+  it("switches session and then /last returns correct text", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+
+    const piCommands: Record<string, unknown>[] = [];
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.piClient = {
+      pid: 1,
+      send(cmd) { piCommands.push(cmd); },
+      close() {},
+    };
+
+    const sessionsDir = setupSessionFixtures();
+    gateway.scanRecentSessions(10, sessionsDir);
+
+    // Switch to the first session
+    const sessionId = "01999999-1111-7aaa-bbbb-ccccddddeeee";
+    gateway.switchToSession(sessionId);
+
+    expect(piCommands).toEqual([{
+      type: "switch_session",
+      sessionPath: expect.stringContaining("01999999-1111-7aaa-bbbb-ccccddddeeee.jsonl"),
+    }]);
+
+    // Now simulate /last command
+    gateway.lastChatId = 789;
+    gateway.handlePiEvent({
+      type: "response",
+      command: "get_last_assistant_text",
+      success: true,
+      data: { text: "The auth bug is fixed." },
+    });
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(789);
+    expect(messages[0]!.text).toBe("The auth bug is fixed.");
   });
 });

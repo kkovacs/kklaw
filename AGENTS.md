@@ -9,7 +9,7 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Three files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL). Extracted for testability.
+Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.ts` (session file scanning), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL). Extracted for testability.
 
 ### Pipeline
 
@@ -31,6 +31,8 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 | `/context` | `get_session_stats` | `showStats()` → formats token counts (K/M) + cost into `<pre>` HTML block |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text as plain message |
 | `/showthink` | (none) | toggles `showThinking` via inline keyboard (Yes/No) |
+| `/resume` | (none; filesystem scan) | scans `~/.pi/agent/sessions/` for recent `.jsonl` session files, shows inline keyboard |
+| `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 
 ### Key design decisions
 
@@ -63,7 +65,8 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 - `tool_execution_*` events not displayed
 - Message queue is in-memory only — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
-- Other builtin slash commands (`/model`, `/compact`, `/fork`, etc.) not registered yet
+- Other builtin slash commands (`/model`, `/compact`, `/fork`, `/clone`, etc.) not registered yet
+- `/resume` shows only 8 most recent; no pagination
 
 ### Pi/provider gotcha
 
@@ -79,6 +82,7 @@ Bun auto-loads `.env` — no library needed.
 | `TELEGRAM_ALLOWED_USER_ID` | single Telegram user ID to accept | — (empty = no one) |
 | `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
+| `PI_SESSION_DIR` | root dir to scan for session `.jsonl` files | `~/.pi/agent/sessions/` |
 
 Extra Pi flags (provider, model, no-session, etc.) are passed on the command line after `--`:
 
@@ -120,6 +124,9 @@ bun test           # run tests
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
 - `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
+- `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()` and `resume:` callback.
+- `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
+- `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
 
 **Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, starts long polling. Not executed when imported for tests.
 
@@ -141,12 +148,28 @@ Spawns subprocess with `stdio: ['pipe','pipe','pipe']`. Reads stdout via custom 
 - `onEvent` — called with parsed JSON object
 - `onExit` / `onError` — called on subprocess exit or spawn error
 
+### `sessions.ts`
+
+Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSessions()` in `index.ts`.
+
+- `SessionInfo` — `{ path, id, created, name?, mtime }` for each discovered session.
+- `formatSessionDate(iso)` → `"YYYY-MM-DD HH:MM"` for button labels.
+- `scanSessions(sessionDir, limit)` — walks `sessionDir` recursively for `.jsonl` files, validates session header (`type: "session"`, UUIDv7 id), reads `timestamp`, scans for latest `session_info` entry (display name). Sorts by file mtime descending, returns top N.
+- Internal: `collectJsonlFiles(dir)` (recursive walk), `readSessionInfo(path)` (header + name extraction).
+
+**Pi session file format:**
+- Default dir: `~/.pi/agent/sessions/<encoded-cwd>/` (cwd with `/:\` → `-`, wrapped in `--...--`)
+- Filename: `<iso-ts>_<uuidv7>.jsonl` (e.g. `2025-05-15T10-30-45-123Z_018f4a2c-....jsonl`)
+- First line (header): `{"type":"session","version":3,"id":"<uuidv7>","timestamp":"<iso>","cwd":"<path>"}`
+- Name stored as: `{"type":"session_info",...,"name":"My Session"}` — appended anywhere in file, latest one wins
+- `set_session_name` RPC rejects empty strings; clearing a name requires extension-level access (not yet wired)
+
 ### `tests/`
 
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
@@ -162,6 +185,32 @@ Telegram message
       → createSafeEditor(api, chatId, messageId)
         → createRelay({ edit: (buf, isFinal) => editor.edit(buf, isFinal) })
       → sendPi({ type: "prompt", message: text })
+
+Telegram command (e.g. /resume)
+  → bot.command("resume", handler)
+    → gateway.scanRecentSessions() → calls sessions.scanSessions(sessionDir, 8)
+      → walks ~/.pi/agent/sessions/ recursively for .jsonl files
+      → validates session header, extracts id/timestamp/name
+      → sorts by file mtime, populates gateway.sessionPicker map
+    → builds InlineKeyboard: one button per session (label: "2026-04-12 15:40 - fix-auth-bug")
+      → callback_data: "resume:<uuid>" (fits in 64-byte limit)
+    → ctx.reply("Resume a session:", { reply_markup: kb })
+
+Telegram callback (e.g. resume button clicked)
+  → bot.callbackQuery(/^resume:(.+)$/, handler)  ← regex captures uuid
+    → gateway.switchToSession(sessionId)
+      → looks up path in sessionPicker
+      → resetSession() (cancel relay, clear queue)
+      → sendPi({ type: "switch_session", sessionPath: path })
+    → ctx.answerCallbackQuery("Switched.")
+    → ctx.editMessageText("Resumed session: 2026-04-12 15:40 - fix-auth-bug")
+
+Telegram command (e.g. /name)
+  → bot.command("name", handler)
+    → parses ctx.match (text after /name)
+    → if empty: ctx.reply("Usage: /name <name>")
+    → sendPi({ type: "set_session_name", name })
+    → ctx.reply("Named.")
 
 Telegram command (e.g. /status)
   → bot.command("status", handler)

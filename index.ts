@@ -1,7 +1,9 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { createRelay, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
+import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
 
 // ============================================================
 // Config (loaded from .env by Bun auto)
@@ -9,6 +11,7 @@ import { createPiClient, type PiClient } from "./pi-client";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
+const SESSION_DIR = (process.env.PI_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions")).replace(/^~/, homedir());
 
 // Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
@@ -250,6 +253,7 @@ export class Gateway {
   currentPlaceholderMessageId: number = 0;
   lastPiError?: string;
   showThinking = false;
+  sessionPicker: Map<string, SessionInfo> = new Map();
   allowedUserId: number;
   api: TelegramApi;
 
@@ -409,6 +413,33 @@ export class Gateway {
     this.currentChatId = 0;
     this.currentPlaceholderMessageId = 0;
     this.lastPiError = undefined;
+  }
+
+  scanRecentSessions(limit: number = 8, sessionDir?: string): SessionInfo[] {
+    const dir = sessionDir ?? SESSION_DIR;
+    dbg(1, `scanRecentSessions dir=${dir}`);
+
+    const sessions = scanSessions(dir, limit);
+    dbg(1, `scanRecentSessions: found ${sessions.length} sessions`);
+
+    this.sessionPicker.clear();
+    for (const s of sessions) {
+      this.sessionPicker.set(s.id, s);
+    }
+
+    return sessions;
+  }
+
+  switchToSession(sessionId: string): void {
+    const info = this.sessionPicker.get(sessionId);
+    if (!info) {
+      console.error(`[gateway] switchToSession: session ${sessionId} not in picker`);
+      return;
+    }
+
+    dbg(1, `switchToSession: ${info.id} -> ${info.path}`);
+    this.resetSession();
+    this.sendPi({ type: "switch_session", sessionPath: info.path });
   }
 
   async showStatus(chatId: number | string, data: unknown): Promise<void> {
@@ -605,6 +636,64 @@ if (import.meta.main) {
       .text("Yes", "showthink:yes")
       .text("✅ No", "showthink:no");
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  });
+
+  bot.command("name", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+
+    const name = ctx.match?.trim();
+    if (!name) {
+      await ctx.reply("Usage: /name <name>");
+      return;
+    }
+
+    gateway.sendPi({ type: "set_session_name", name });
+    await ctx.reply("Named.");
+  });
+
+  bot.command("resume", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+
+    const sessions = gateway.scanRecentSessions();
+
+    if (sessions.length === 0) {
+      await ctx.reply("No previous sessions found.");
+      return;
+    }
+
+    const kb = new InlineKeyboard();
+    for (const s of sessions) {
+      const label = s.name
+        ? `${formatSessionDate(s.created)} - ${s.name}`
+        : `${formatSessionDate(s.created)} - ${s.id.slice(-12)}`;
+      kb.text(label, `resume:${s.id}`).row();
+    }
+
+    await ctx.reply("Resume a session:", { reply_markup: kb });
+  });
+
+  bot.callbackQuery(/^resume:(.+)$/, async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+
+    const sessionId = ctx.match?.[1];
+    if (!sessionId) return;
+
+    const info = gateway.sessionPicker.get(sessionId);
+
+    if (!info) {
+      await ctx.answerCallbackQuery("Expired. Run /resume again.");
+      return;
+    }
+
+    gateway.switchToSession(sessionId);
+    await ctx.answerCallbackQuery("Switched.");
+
+    const label = info.name
+      ? `${info.name}`
+      : info.id.slice(-12);
+    await ctx.editMessageText(
+      `Resumed session: ${formatSessionDate(info.created)} - ${label}`,
+    );
   });
 
   bot.on("message:text", async (ctx) => {
