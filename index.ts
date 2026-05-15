@@ -329,6 +329,11 @@ export class Gateway {
     images?: ImageContent[],
   ): Promise<void> {
     dbg(1, `startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" images=${images?.length ?? 0}`);
+    // piStreaming guards against reentrant startPiSession() from Telegram
+    // messages arriving during the async sendMessage below. currentRelay
+    // is created after the await, but Pi can't emit text_delta until it
+    // receives the prompt command at the end of this function — the
+    // null-relay window is harmless.
     this.piStreaming = true;
     this.currentChatId = chatId;
     this.lastPiError = undefined;
@@ -404,17 +409,19 @@ export class Gateway {
     if (!s) return;
 
     const model = s.model as { provider?: string; modelId?: string; id?: string } | undefined;
-    const modelName = model
+    const modelName = htmlEscape(model
       ? `${model.provider ?? "?"}/${model.modelId ?? model.id ?? "?"}`
-      : "?";
+      : "?");
 
+    const sessionId = htmlEscape(String(s.sessionId ?? "?"));
+    const sessionName = s.sessionName ? htmlEscape(`"${s.sessionName}"`) : "";
     const lines = [
       `🤖 Model:         ${modelName}`,
-      `📋 Session:       ${s.sessionId ?? "?"}${s.sessionName ? ` ("${s.sessionName}")` : ""}`,
+      `📋 Session:       ${sessionId}${sessionName ? ` (${sessionName})` : ""}`,
       `💬 Messages:      ${s.messageCount ?? 0}${s.pendingMessageCount ? ` (+${s.pendingMessageCount} pending)` : ""}`,
       `💭 Thinking:      ${s.thinkingLevel ?? "?"}`,
     ];
-    if (s.sessionFile) lines.push(`📁 Session file:  ${s.sessionFile}`);
+    if (s.sessionFile) lines.push(`📁 Session file:  ${htmlEscape(s.sessionFile)}`);
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStatus failed: ${err.message}`),
@@ -516,12 +523,15 @@ export class Gateway {
         }
         const modStr = modIcons.join("");
         const costStr = m.cost ? `$${m.cost.input}/${m.cost.output}` : "?";
-        const name = m.name ?? m.id ?? "?";
-        lines.push(`${m.provider}/${m.id} — ${name}`);
+        const name = htmlEscape(m.name ?? m.id ?? "?");
+        lines.push(`${htmlEscape(m.provider ?? "?")}/${htmlEscape(m.id ?? "?")} — ${name}`);
         lines.push(`  ${modStr}  ${costStr}  ${ctx}`);
       }
       const maxLen = 3900;
-      const tagOverhead = 11; // <pre></pre>
+      // tagOverhead = strlen("<pre></pre>") = 11
+      // reduce adds 1 for a newline after every line (including last); the
+      // -1 compensates because join("\n") does not add a trailing newline
+      const tagOverhead = 11;
       const totalLen = tagOverhead + lines.reduce((s, l) => s + l.length + 1, 0) - 1;
       if (totalLen <= maxLen) {
         const text = `<pre>${lines.join("\n")}</pre>`;
@@ -557,7 +567,7 @@ export class Gateway {
     const tok = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 
     const lines = [
-      `📋 Session:       ${s.sessionId ?? "?"}`,
+      `📋 Session:       ${htmlEscape(String(s.sessionId ?? "?"))}`,
       `💬 Total messages: ${s.totalMessages ?? 0} (user: ${s.userMessages ?? 0}, assistant: ${s.assistantMessages ?? 0})`,
       `🔧 Tool calls:    ${s.toolCalls ?? 0} / results: ${s.toolResults ?? 0}`,
       `📥 Tokens in:     ${tokens ? tok(tokens.input) : "?"}`,
@@ -566,7 +576,7 @@ export class Gateway {
       `📊 Tokens total:  ${tokens ? tok(tokens.total) : "?"}`,
       `💰 Cost:          $${s.cost != null ? Number(s.cost).toFixed(4) : "?"}`,
     ];
-    if (s.sessionFile) lines.push(`📁 Session file:  ${s.sessionFile}`);
+    if (s.sessionFile) lines.push(`📁 Session file:  ${htmlEscape(s.sessionFile)}`);
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStats failed: ${err.message}`),
@@ -708,10 +718,14 @@ if (import.meta.main) {
       onExit: (code) => {
         gateway.piStreaming = false;
         gateway.currentRelay = null;
+        gateway.processQueue();
         console.error(`[pi] exited (code=${code}). Restarting in 1s...`);
         setTimeout(spawnPi, 1000);
       },
       onError: (err) => {
+        gateway.piStreaming = false;
+        gateway.currentRelay = null;
+        gateway.processQueue();
         console.error(`[pi] spawn error: ${err.message}`);
         setTimeout(spawnPi, 1000);
       },
@@ -724,33 +738,31 @@ if (import.meta.main) {
     await ctx.reply("👋 Send a message to talk to pi.");
   });
 
+  // All handlers below require auth — enforced by this filter
+  bot.filter((ctx) => ctx.from?.id === allowedUserId);
+
   bot.command("new", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.resetSession();
     gateway.sendPi({ type: "new_session" });
     await ctx.reply("🆕 New session.");
   });
 
   bot.command("status", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     await gateway.showDaemonStatus(ctx.chatId);
   });
 
   bot.command("session", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_state" });
     gateway.sendPi({ type: "get_session_stats" });
   });
 
   bot.command("last", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_last_assistant_text" });
   });
 
   bot.command("showthink", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     const kb = new InlineKeyboard()
       .text(gateway.showThinking ? "✅ Yes" : "Yes", "showthink:yes")
       .text(gateway.showThinking ? "No" : "✅ No", "showthink:no");
@@ -758,7 +770,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery("showthink:yes", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.showThinking = true;
     await ctx.answerCallbackQuery("✅ Enabled.");
     const kb = new InlineKeyboard()
@@ -768,7 +779,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery("showthink:no", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.showThinking = false;
     await ctx.answerCallbackQuery("❌ Disabled.");
     const kb = new InlineKeyboard()
@@ -778,7 +788,6 @@ if (import.meta.main) {
   });
 
   bot.command("showtools", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     const kb = new InlineKeyboard()
       .text(gateway.showTools ? "✅ On" : "On", "showtools:on")
       .text(gateway.showTools ? "Off" : "✅ Off", "showtools:off");
@@ -786,7 +795,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery("showtools:on", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.showTools = true;
     await ctx.answerCallbackQuery("✅ Enabled.");
     const kb = new InlineKeyboard()
@@ -796,7 +804,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery("showtools:off", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.showTools = false;
     await ctx.answerCallbackQuery("❌ Disabled.");
     const kb = new InlineKeyboard()
@@ -806,7 +813,6 @@ if (import.meta.main) {
   });
 
   bot.command("showraw", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     const kb = new InlineKeyboard()
       .text(gateway.rawMode ? "✅ Raw" : "Raw", "showraw:on")
       .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "showraw:off");
@@ -814,7 +820,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery("showraw:on", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.rawMode = true;
     await ctx.answerCallbackQuery("📄 Raw mode. No formatting.");
     const kb = new InlineKeyboard()
@@ -824,7 +829,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery("showraw:off", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.rawMode = false;
     await ctx.answerCallbackQuery("📄 MarkdownV2 mode.");
     const kb = new InlineKeyboard()
@@ -834,7 +838,6 @@ if (import.meta.main) {
   });
 
   bot.command("name", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
 
     const name = ctx.match?.trim();
     if (!name) {
@@ -847,14 +850,12 @@ if (import.meta.main) {
   });
 
   bot.command("delete", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     gateway.deleteRequestChatId = ctx.chatId;
     gateway.sendPi({ type: "get_state" });
     await ctx.reply("🗑️ Deleting session...");
   });
 
   bot.command("resume", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
 
     const sessions = gateway.scanRecentSessions();
 
@@ -875,7 +876,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery(/^resume:(.+)$/, async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
 
     const sessionId = ctx.match?.[1];
     if (!sessionId) return;
@@ -899,13 +899,11 @@ if (import.meta.main) {
   });
 
   bot.command("quit", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     await ctx.reply("👋 Bye!");
     process.exit(0);
   });
 
   bot.command("model", async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     const filter = ctx.match?.trim();
     gateway.modelFilter = filter || undefined;
     gateway.lastChatId = ctx.chatId;
@@ -913,7 +911,6 @@ if (import.meta.main) {
   });
 
   bot.callbackQuery(/^model:(.+)$/, async (ctx) => {
-    if (ctx.from?.id !== allowedUserId) return;
     const data = ctx.match?.[1];
     if (!data) return;
 

@@ -4,7 +4,7 @@
 
 export interface Relay {
   onDelta(text: string, kind?: 'text' | 'thinking'): void;
-  onDone(): Promise<void>;
+  onDone(): Promise<boolean>;
   cancel(): void;
 }
 
@@ -12,7 +12,7 @@ const MDV2_ESCAPE = /([_*[\]()~`>#+\-=|{}.!\\])/g;
 // Relaxed: allows `*`, `_`, `` ` `` through so Pi's **bold** / *italic* / `code` render
 const MDV2_ESCAPE_TEXT = /([[\]()~>#+\-=|{}.!\\])/g;
 
-function escapeMdV2(s: string): string {
+export function escapeMdV2(s: string): string {
   return s.replace(MDV2_ESCAPE, '\\$1');
 }
 
