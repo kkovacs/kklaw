@@ -418,7 +418,7 @@ describe("Gateway.handlePiEvent", () => {
     });
 
     expect(edits.length).toBe(1);
-    expect(edits[0]!.text).toBe("Error: provider validation failed");
+    expect(edits[0]!.text).toBe("❌ Error: provider validation failed");
     expect(gateway.piStreaming).toBe(false);
   });
 
@@ -568,7 +568,7 @@ describe("Gateway.handlePiEvent", () => {
     expect(gateway.deleteRequestChatId).toBe(0);
     expect(gateway.piStreaming).toBe(false);
     expect(sent.length).toBe(1);
-    expect(sent[0]).toEqual({ chatId: 123, text: "Session deleted. New session started." });
+    expect(sent[0]).toEqual({ chatId: 123, text: "🗑️ Session deleted. 🆕 New session started." });
   });
 
   it("skips unlink when session not in picker, still resets and starts new", async () => {
@@ -591,7 +591,7 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(deletedPaths).toEqual([]);
     expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(sent).toEqual(["Session deleted. New session started."]);
+    expect(sent).toEqual(["🗑️ Session deleted. 🆕 New session started."]);
     expect(gateway.deleteRequestChatId).toBe(0);
   });
 
@@ -615,7 +615,7 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(deletedPaths).toEqual([]);
     expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(sent).toEqual(["Session deleted. New session started."]);
+    expect(sent).toEqual(["🗑️ Session deleted. 🆕 New session started."]);
   });
 
   it("does NOT trigger delete logic on non-get_state responses with deleteRequestChatId set", () => {
@@ -653,7 +653,7 @@ describe("Gateway.handlePiEvent", () => {
     });
 
     expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(sent).toEqual(["Session deleted. New session started."]);
+    expect(sent).toEqual(["🗑️ Session deleted. 🆕 New session started."]);
   });
 });
 
@@ -798,7 +798,7 @@ describe("Gateway.showStats (/context)", () => {
     expect(messages[0]!.text).toContain("</pre>");
     expect(messages[0]!.text).toContain("abc123");
     expect(messages[0]!.text).toContain("user: 3, assistant: 5");
-    expect(messages[0]!.text).toContain("Tool calls:    2 / results: 2");
+    expect(messages[0]!.text).toContain("🔧 Tool calls:    2 / results: 2");
     expect(messages[0]!.text).toContain("1.2K"); // 1200 input
     expect(messages[0]!.text).toContain("450");  // output < 1000, no abbreviation
     expect(messages[0]!.text).toContain("1.6K"); // 1650 total
@@ -865,7 +865,7 @@ describe("Gateway.showLastMessage (/last)", () => {
     await gateway.showLastMessage(1, { text: null });
 
     expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toBe("(No assistant messages yet.)");
+    expect(messages[0]!.text).toBe("💬 (No assistant messages yet.)");
   });
 
   it("sends placeholder when data is undefined", async () => {
@@ -1022,7 +1022,7 @@ describe("Integration: replay command responses", () => {
     expect(messages[0]!.text).toContain("019e23a4-4c58-71a1-b3b9-6da3b6c97a28");
     expect(messages[0]!.text).toContain("0");
     expect(messages[0]!.text).toContain("$0.0000");
-    expect(messages[0]!.text).toContain("Session file:");
+    expect(messages[0]!.text).toContain("📁 Session file:");
     expect(messages[0]!.text).toContain("<pre>");
     expect(messages[0]!.text).toContain("</pre>");
   });

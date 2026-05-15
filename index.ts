@@ -338,7 +338,7 @@ export class Gateway {
           this.resetSession();
           this.sendPi({ type: "new_session" });
           try {
-            await this.api.sendMessage(chatId, "Session deleted. New session started.");
+            await this.api.sendMessage(chatId, "🗑️ Session deleted. 🆕 New session started.");
           } catch (e) {
             console.error(`[delete] sendMessage failed: ${e}`);
           }
@@ -404,7 +404,7 @@ export class Gateway {
           await this.api.editMessageText(
             this.currentChatId,
             this.currentPlaceholderMessageId,
-            `Error: ${this.lastPiError}`,
+            `❌ Error: ${this.lastPiError}`,
           );
         } catch (err) {
           console.error(`[telegram] error edit failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -547,12 +547,12 @@ export class Gateway {
       : "?";
 
     const lines = [
-      `Model:         ${modelName}`,
-      `Session:       ${s.sessionId ?? "?"}${s.sessionName ? ` ("${s.sessionName}")` : ""}`,
-      `Messages:      ${s.messageCount ?? 0}${s.pendingMessageCount ? ` (+${s.pendingMessageCount} pending)` : ""}`,
-      `Thinking:      ${s.thinkingLevel ?? "?"}`,
+      `🤖 Model:         ${modelName}`,
+      `📋 Session:       ${s.sessionId ?? "?"}${s.sessionName ? ` ("${s.sessionName}")` : ""}`,
+      `💬 Messages:      ${s.messageCount ?? 0}${s.pendingMessageCount ? ` (+${s.pendingMessageCount} pending)` : ""}`,
+      `💭 Thinking:      ${s.thinkingLevel ?? "?"}`,
     ];
-    if (s.sessionFile) lines.push(`Session file:  ${s.sessionFile}`);
+    if (s.sessionFile) lines.push(`📁 Session file:  ${s.sessionFile}`);
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStatus failed: ${err.message}`),
@@ -569,7 +569,7 @@ export class Gateway {
     if (!d) return;
     const text = d.text as string | null | undefined;
     if (!text) {
-      await this.api.sendMessage(chatId, "(No assistant messages yet.)").catch((err: Error) =>
+      await this.api.sendMessage(chatId, "💬 (No assistant messages yet.)").catch((err: Error) =>
         console.error(`[telegram] showLastMessage failed: ${err.message}`),
       );
       return;
@@ -588,16 +588,16 @@ export class Gateway {
     const tok = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 
     const lines = [
-      `Session:       ${s.sessionId ?? "?"}`,
-      `Total messages: ${s.totalMessages ?? 0} (user: ${s.userMessages ?? 0}, assistant: ${s.assistantMessages ?? 0})`,
-      `Tool calls:    ${s.toolCalls ?? 0} / results: ${s.toolResults ?? 0}`,
-      `Tokens in:     ${tokens ? tok(tokens.input) : "?"}`,
-      `Tokens out:    ${tokens ? tok(tokens.output) : "?"}`,
-      `Tokens cache:  ${tokens ? `r:${tok(tokens.cacheRead)} w:${tok(tokens.cacheWrite)}` : "?"}`,
-      `Tokens total:  ${tokens ? tok(tokens.total) : "?"}`,
-      `Cost:          $${s.cost != null ? Number(s.cost).toFixed(4) : "?"}`,
+      `📋 Session:       ${s.sessionId ?? "?"}`,
+      `💬 Total messages: ${s.totalMessages ?? 0} (user: ${s.userMessages ?? 0}, assistant: ${s.assistantMessages ?? 0})`,
+      `🔧 Tool calls:    ${s.toolCalls ?? 0} / results: ${s.toolResults ?? 0}`,
+      `📥 Tokens in:     ${tokens ? tok(tokens.input) : "?"}`,
+      `📤 Tokens out:    ${tokens ? tok(tokens.output) : "?"}`,
+      `💾 Tokens cache:  ${tokens ? `r:${tok(tokens.cacheRead)} w:${tok(tokens.cacheWrite)}` : "?"}`,
+      `📊 Tokens total:  ${tokens ? tok(tokens.total) : "?"}`,
+      `💰 Cost:          $${s.cost != null ? Number(s.cost).toFixed(4) : "?"}`,
     ];
-    if (s.sessionFile) lines.push(`Session file:  ${s.sessionFile}`);
+    if (s.sessionFile) lines.push(`📁 Session file:  ${s.sessionFile}`);
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStats failed: ${err.message}`),
@@ -683,14 +683,14 @@ if (import.meta.main) {
   }
 
   bot.command("start", async (ctx) => {
-    await ctx.reply("Send a message to talk to pi.");
+    await ctx.reply("👋 Send a message to talk to pi.");
   });
 
   bot.command("new", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.resetSession();
     gateway.sendPi({ type: "new_session" });
-    await ctx.reply("New session.");
+    await ctx.reply("🆕 New session.");
   });
 
   bot.command("status", async (ctx) => {
@@ -716,13 +716,13 @@ if (import.meta.main) {
     const kb = new InlineKeyboard()
       .text(gateway.showThinking ? "✅ Yes" : "Yes", "showthink:yes")
       .text(gateway.showThinking ? "No" : "✅ No", "showthink:no");
-    await ctx.reply("Show LLM thinking?", { reply_markup: kb });
+    await ctx.reply("💭 Show LLM thinking?", { reply_markup: kb });
   });
 
   bot.callbackQuery("showthink:yes", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.showThinking = true;
-    await ctx.answerCallbackQuery("Enabled.");
+    await ctx.answerCallbackQuery("✅ Enabled.");
     const kb = new InlineKeyboard()
       .text("✅ Yes", "showthink:yes")
       .text("No", "showthink:no");
@@ -732,7 +732,7 @@ if (import.meta.main) {
   bot.callbackQuery("showthink:no", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.showThinking = false;
-    await ctx.answerCallbackQuery("Disabled.");
+    await ctx.answerCallbackQuery("❌ Disabled.");
     const kb = new InlineKeyboard()
       .text("Yes", "showthink:yes")
       .text("✅ No", "showthink:no");
@@ -744,13 +744,13 @@ if (import.meta.main) {
     const kb = new InlineKeyboard()
       .text(gateway.showTools ? "✅ On" : "On", "showtools:on")
       .text(gateway.showTools ? "Off" : "✅ Off", "showtools:off");
-    await ctx.reply("Show tool calls?", { reply_markup: kb });
+    await ctx.reply("🔧 Show tool calls?", { reply_markup: kb });
   });
 
   bot.callbackQuery("showtools:on", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.showTools = true;
-    await ctx.answerCallbackQuery("Enabled.");
+    await ctx.answerCallbackQuery("✅ Enabled.");
     const kb = new InlineKeyboard()
       .text("✅ On", "showtools:on")
       .text("Off", "showtools:off");
@@ -760,7 +760,7 @@ if (import.meta.main) {
   bot.callbackQuery("showtools:off", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.showTools = false;
-    await ctx.answerCallbackQuery("Disabled.");
+    await ctx.answerCallbackQuery("❌ Disabled.");
     const kb = new InlineKeyboard()
       .text("On", "showtools:on")
       .text("✅ Off", "showtools:off");
@@ -772,13 +772,13 @@ if (import.meta.main) {
     const kb = new InlineKeyboard()
       .text(gateway.rawMode ? "✅ Raw" : "Raw", "showraw:on")
       .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "showraw:off");
-    await ctx.reply("Output format:", { reply_markup: kb });
+    await ctx.reply("📄 Output format:", { reply_markup: kb });
   });
 
   bot.callbackQuery("showraw:on", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.rawMode = true;
-    await ctx.answerCallbackQuery("Raw mode. No formatting.");
+    await ctx.answerCallbackQuery("📄 Raw mode. No formatting.");
     const kb = new InlineKeyboard()
       .text("✅ Raw", "showraw:on")
       .text("MarkdownV2", "showraw:off");
@@ -788,7 +788,7 @@ if (import.meta.main) {
   bot.callbackQuery("showraw:off", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.rawMode = false;
-    await ctx.answerCallbackQuery("MarkdownV2 mode.");
+    await ctx.answerCallbackQuery("📄 MarkdownV2 mode.");
     const kb = new InlineKeyboard()
       .text("Raw", "showraw:on")
       .text("✅ MarkdownV2", "showraw:off");
@@ -800,19 +800,19 @@ if (import.meta.main) {
 
     const name = ctx.match?.trim();
     if (!name) {
-      await ctx.reply("Usage: /name <name>");
+      await ctx.reply("ℹ️ Usage: /name <name>");
       return;
     }
 
     gateway.sendPi({ type: "set_session_name", name });
-    await ctx.reply("Named.");
+    await ctx.reply("✏️ Named.");
   });
 
   bot.command("delete", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.deleteRequestChatId = ctx.chatId;
     gateway.sendPi({ type: "get_state" });
-    await ctx.reply("Deleting session...");
+    await ctx.reply("🗑️ Deleting session...");
   });
 
   bot.command("resume", async (ctx) => {
@@ -821,7 +821,7 @@ if (import.meta.main) {
     const sessions = gateway.scanRecentSessions();
 
     if (sessions.length === 0) {
-      await ctx.reply("No previous sessions found.");
+      await ctx.reply("📭 No previous sessions found.");
       return;
     }
 
@@ -833,7 +833,7 @@ if (import.meta.main) {
       kb.text(label, `resume:${s.id}`).row();
     }
 
-    await ctx.reply("Resume a session:", { reply_markup: kb });
+    await ctx.reply("📋 Resume a session:", { reply_markup: kb });
   });
 
   bot.callbackQuery(/^resume:(.+)$/, async (ctx) => {
@@ -845,18 +845,18 @@ if (import.meta.main) {
     const info = gateway.sessionPicker.get(sessionId);
 
     if (!info) {
-      await ctx.answerCallbackQuery("Expired. Run /resume again.");
+      await ctx.answerCallbackQuery("⏰ Expired. Run /resume again.");
       return;
     }
 
     gateway.switchToSession(sessionId);
-    await ctx.answerCallbackQuery("Switched.");
+    await ctx.answerCallbackQuery("✅ Switched.");
 
     const label = info.name
       ? `${info.name}`
       : info.id.slice(-12);
     await ctx.editMessageText(
-      `Resumed session: ${formatSessionDate(info.created)} - ${label}`,
+      `📋 Resumed session: ${formatSessionDate(info.created)} - ${label}`,
     );
   });
 
