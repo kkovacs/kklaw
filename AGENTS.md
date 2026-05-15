@@ -14,7 +14,7 @@ Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.
 ### Pipeline
 
 1. Telegram user sends a text message or slash command
-2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`. Known slash commands are intercepted by `bot.command()` handlers; unknown ones (e.g. `/skill:name`, `/model`) pass through as regular prompts to Pi.
+2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`. Known slash commands are intercepted by `bot.command()` handlers; unknown ones (e.g. `/some-custom-command`) pass through as regular prompts to Pi.
 3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi. While pi is working, a "typing..." indicator is sent to Telegram reactively (on each incoming Pi event, with 4s cooldown to avoid rate limits). Stops naturally when events stop arriving (~5s Telegram expiry).
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
 5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
@@ -35,6 +35,7 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 | `/showraw` | (none) | toggles `rawMode` via inline keyboard (Raw / MarkdownV2); controls escaping + `parse_mode` for streaming and `/last` |
 | `/resume` | (none; filesystem scan) | scans `~/.pi/agent/sessions/` for recent `.jsonl` session files, shows inline keyboard |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
+| `/model [filter]` | `get_available_models` | `/model` alone → lists all models in `<pre>` (provider/id, name, context, modalities as emoji, price). `/model text` → shows filtered inline keyboard; button click fires `set_model` RPC. Both modes handled by `showModels()`. Filter is case-insensitive on name + id. Uses `modelFilter` sentinel to decide list vs buttons on async response. Callback data: `model:provider/id` (split on first `/`). |
 | `/delete` | `get_state` → `unlink` → `new_session` | async: sends `get_state`, finds session file in `sessionPicker` by `sessionId`, deletes the `.jsonl` file via `fs.unlink`, calls `resetSession()` + `new_session`, replies "Session deleted. New session started." Falls back gracefully if session not found or file is missing. |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
 
@@ -81,6 +82,31 @@ Pi stores assistant `thinking` blocks with `thinkingSignature: "reasoning"` in t
 
 Skills are triggered by prefixing a prompt with `/skill:name`. When Pi receives `{"type":"prompt", "message":"/skill:skill-name args"}`, it expands the skill server-side — loading the skill's `SKILL.md`, stripping YAML frontmatter, and wrapping the body in `<skill>` XML before appending user arguments. The LLM sees the expanded content, not the `/skill:` invocation. Available skills are discoverable via `{"type":"get_commands"}` RPC. See `pi/packages/coding-agent/docs/rpc.md` lines 68, 79, 103, 701-738 and `pi/packages/coding-agent/src/core/agent-session.ts:_expandSkillCommand()`.
 
+### Pi model RPC
+
+The `/model` command uses two Pi RPC calls:
+
+- **`get_available_models`** → `{ type: "get_available_models" }` → response: `{ command: "get_available_models", data: { models: Model[] } }`
+- **`set_model`** → `{ type: "set_model", provider: "...", modelId: "..." }` → response: `{ command: "set_model", data: Model }` (full Model object)
+
+**`Model` shape** (from `pi/packages/coding-agent/docs/rpc.md` lines 1210-1227):
+```typescript
+interface ModelInfo {
+  id: string;              // e.g. "claude-sonnet-4-20250514"
+  name: string;            // e.g. "Claude Sonnet 4"
+  provider: string;        // e.g. "anthropic"
+  api: string;             // e.g. "anthropic-messages"
+  contextWindow: number;   // e.g. 200000
+  maxTokens: number;       // e.g. 16384
+  input: string[];         // modalities: ["text", "image", "audio", "video"]
+  reasoning: boolean;      // thinking support
+  cost: { input: number; output: number; cacheRead?: number; cacheWrite?: number };  // USD per MTok
+  baseUrl: string;         // API endpoint (not displayed)
+}
+```
+
+Displayed fields (in order): modalities as emoji (📝 text, 🏙️ image, 🎤 audio, 🎬 video), cost (`$in/$out` per MTok), context window (K/M). Missing fields show `?`.
+
 ## Configuration (`.env`)
 
 Bun auto-loads `.env` — no library needed.
@@ -118,7 +144,7 @@ bun test           # run tests
 - `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, starts or enqueues a pi session. Unknown slash commands (not intercepted by `bot.command()`) pass through as regular prompts.
 - `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt",...}` to pi.
 - `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
-  - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()` when `lastChatId` is set. Also handles `/delete` flow when `deleteRequestChatId` is set: extracts `sessionId` from `get_state` response, looks up `SessionInfo.path` in `sessionPicker` (rescans only if not found), deletes the `.jsonl` file, then `resetSession()` + `new_session` + confirmation message.
+  - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()`, `get_available_models` → `showModels()` when `lastChatId` is set. Also handles `/delete` flow when `deleteRequestChatId` is set: extracts `sessionId` from `get_state` response, looks up `SessionInfo.path` in `sessionPicker` (rescans only if not found), deletes the `.jsonl` file, then `resetSession()` + `new_session` + confirmation message.
   - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
   - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
   - `message_update` with `error` → logs to stderr immediately (always, even without `-v`)
@@ -136,6 +162,9 @@ bun test           # run tests
 - `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost). Used by `/session` command.
 - `showDaemonStatus(chatId)` — self-contained: formats daemon health into `<pre>` HTML (uptime, Pi status/pid, streaming state, queue depth, toggle states). Used by `/status` command. Reads `startedAt` field for uptime calculation.
 - `showLastMessage(chatId, data)` — sends `get_last_assistant_text` response via `formatForTelegram()`. Falls back to `"(No assistant messages yet.)"` when text is null.
+- `showModels(chatId, data)` — formats `get_available_models` response. Two modes governed by `modelFilter` sentinel:
+  - `modelFilter` unset → full list as `<pre>` HTML: `provider/id — Name` on first line, indented second line: `📝🏙️  $in/$out  200K` (modalities, price, context). If the list exceeds the Telegram message limit (~3900 chars), automatically splits into multiple `<pre>` messages. Filters case-insensitively on name and id.
+  - `modelFilter` set → buttons with `model:provider/id` callback data, filtered case-insensitively on name and id. Clears `modelFilter` after handling. Sends `"No models matching..."` or `"No models available."` as appropriate.
 - `startedAt: Date` — set in constructor; used by `showDaemonStatus()` for uptime display.
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
@@ -146,6 +175,7 @@ bun test           # run tests
 - `deleteRequestChatId: number | string` — set by `/delete` command; triggers session deletion + reset in the `get_state` response handler. Cleared after handling.
 - `deleteFile: (path: string) => Promise<void>` — injected file deletion function (defaults to `fs.promises.unlink`). Testable via mock.
 - `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()`, `/delete` handler, and `resume:` callback.
+- `modelFilter?: string` — sentinel for `/model` async response: if set, `showModels()` renders filtered buttons instead of full `<pre>` list. Set by `/model <filter>` handler, cleared by `showModels()` after use.
 - `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
 - `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
 
@@ -192,7 +222,7 @@ Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSe
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `showModels` (full list, filtered buttons, no-match, empty, modality emoji mapping, missing fields), `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`/`get_available_models`; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
@@ -250,6 +280,27 @@ Telegram command (e.g. /name)
     → sendPi({ type: "set_session_name", name })
     → ctx.reply("Named.")
 
+Telegram command (e.g. /model)
+  → bot.command("model", handler)
+    → [auth check]
+    → parses ctx.match (optional filter text)
+    → gateway.modelFilter = filter || undefined
+    → gateway.lastChatId = ctx.chatId
+    → sendPi({ type: "get_available_models" })
+  ... (loose coupling: response arrives later)
+  → Gateway.handlePiEvent()
+    → [response, command="get_available_models"] → showModels(lastChatId, data)
+      → if modelFilter: filter models (case-insensitive on name+id), build inline_keyboard buttons (callback_data: "model:provider/id"), send via api.sendMessage with reply_markup
+      → if no modelFilter: format all models as <pre> HTML list (provider/id — Name, context window, modality emoji, $in/$out cost), send via api.sendMessage({ parse_mode: "HTML" })
+      → clear modelFilter
+
+Telegram callback (e.g. model button clicked)
+  → bot.callbackQuery(/^model:(.+)$/, handler)  ← regex captures "provider/modelId"
+    → parses provider and modelId (split on first "/")
+    → sendPi({ type: "set_model", provider, modelId })
+    → ctx.answerCallbackQuery("✅ Switched to provider/modelId.")
+    → ctx.editMessageText("✅ Model: provider/modelId")
+
 Telegram command (e.g. /showraw)
   → bot.command("showraw", handler)
     → shows inline keyboard: Raw / MarkdownV2 with current state checked
@@ -287,7 +338,7 @@ pi stdout
     → JSON.parse(line)
     → Gateway.handlePiEvent()
       → [any event except response, agent_end] → sendTyping(chatId) (4s cooldown)
-      → [response] → log success/error; route get_state/get_session_stats
+      → [response] → log success/error; route get_state, get_session_stats, get_last_assistant_text, get_available_models
       → [text_delta] → relay.onDelta(delta, 'text')
       → [thinking_delta] → relay.onDelta(delta, 'thinking')
         → [debounce 600ms] → createSafeEditor.edit(buf)

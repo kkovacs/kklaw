@@ -71,6 +71,16 @@ interface PiEvent {
   args?: Record<string, unknown>;
 }
 
+interface ModelInfo {
+  id?: string;
+  name?: string;
+  provider?: string;
+  contextWindow?: number;
+  input?: string[];
+  reasoning?: boolean;
+  cost?: { input: number; output: number };
+}
+
 // ============================================================
 // Gateway: all mutable state + business logic
 // ============================================================
@@ -96,6 +106,7 @@ export class Gateway {
   showTools = false;
   deleteRequestChatId: number | string = 0;
   sessionPicker: Map<string, SessionInfo> = new Map();
+  modelFilter?: string;
   allowedUserId: number;
   api: TelegramApi;
   deleteFile: (path: string) => Promise<void> = unlink;
@@ -167,6 +178,9 @@ export class Gateway {
         }
         if (resp.command === "get_last_assistant_text" && this.lastChatId) {
           this.showLastMessage(this.lastChatId, resp.data);
+        }
+        if (resp.command === "get_available_models" && this.lastChatId) {
+          this.showModels(this.lastChatId, resp.data);
         }
       }
       return;
@@ -424,6 +438,86 @@ export class Gateway {
     await this.api.sendMessage(chatId, msg.text, msg.other).catch((err: Error) =>
       console.error(`[telegram] showLastMessage failed: ${err.message}`),
     );
+  }
+
+  async showModels(chatId: number | string, data: unknown): Promise<void> {
+    const d = data as { models?: ModelInfo[] } | undefined;
+    const models = d?.models ?? [];
+
+    if (this.modelFilter) {
+      const filter = this.modelFilter.toLowerCase();
+      const matches = models.filter(m =>
+        (m.name ?? "").toLowerCase().includes(filter) ||
+        (m.id ?? "").toLowerCase().includes(filter)
+      );
+      this.modelFilter = undefined;
+
+      if (matches.length === 0) {
+        await this.api.sendMessage(chatId, `No models matching "${filter}".`).catch((err: Error) =>
+          console.error(`[telegram] showModels failed: ${err.message}`),
+        );
+        return;
+      }
+
+      const inline_keyboard = matches.map(m => [{
+        text: `${m.provider}/${m.id}`,
+        callback_data: `model:${m.provider}/${m.id}`,
+      }]);
+      await this.api.sendMessage(chatId, `🔍 Models matching "${filter}":`, {
+        reply_markup: { inline_keyboard },
+      }).catch((err: Error) =>
+        console.error(`[telegram] showModels failed: ${err.message}`),
+      );
+    } else {
+      if (models.length === 0) {
+        await this.api.sendMessage(chatId, "No models available.").catch((err: Error) =>
+          console.error(`[telegram] showModels failed: ${err.message}`),
+        );
+        return;
+      }
+
+      const lines = [`🤖 Available models (${models.length}):`, ""];
+      for (const m of models) {
+        const ctx = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}K` : "?";
+        const modIcons = ["📝"];
+        for (const mod of (m.input as string[] | undefined) ?? []) {
+          if (mod === "image") modIcons.push("🏙️");
+          else if (mod === "audio") modIcons.push("🎤");
+          else if (mod === "video") modIcons.push("🎬");
+        }
+        const modStr = modIcons.join("");
+        const costStr = m.cost ? `$${m.cost.input}/${m.cost.output}` : "?";
+        const name = m.name ?? m.id ?? "?";
+        lines.push(`${m.provider}/${m.id} — ${name}`);
+        lines.push(`  ${modStr}  ${costStr}  ${ctx}`);
+      }
+      const maxLen = 3900;
+      const tagOverhead = 11; // <pre></pre>
+      const totalLen = tagOverhead + lines.reduce((s, l) => s + l.length + 1, 0) - 1;
+      if (totalLen <= maxLen) {
+        const text = `<pre>${lines.join("\n")}</pre>`;
+        await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
+          console.error(`[telegram] showModels failed: ${err.message}`),
+        );
+      } else {
+        let start = 0;
+        while (start < lines.length) {
+          let end = start;
+          let curLen = tagOverhead;
+          while (end < lines.length) {
+            const add = lines[end].length + 1;
+            if (curLen + add > maxLen && end > start) break;
+            curLen += add;
+            end++;
+          }
+          const chunk = lines.slice(start, end).join("\n");
+          await this.api.sendMessage(chatId, `<pre>${chunk}</pre>`, { parse_mode: "HTML" }).catch((err: Error) =>
+            console.error(`[telegram] showModels failed: ${err.message}`),
+          );
+          start = end;
+        }
+      }
+    }
   }
 
   async showStats(chatId: number | string, data: unknown): Promise<void> {
@@ -712,6 +806,29 @@ if (import.meta.main) {
     process.exit(0);
   });
 
+  bot.command("model", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    const filter = ctx.match?.trim();
+    gateway.modelFilter = filter || undefined;
+    gateway.lastChatId = ctx.chatId;
+    gateway.sendPi({ type: "get_available_models" });
+  });
+
+  bot.callbackQuery(/^model:(.+)$/, async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    const data = ctx.match?.[1];
+    if (!data) return;
+
+    const slash = data.indexOf("/");
+    if (slash === -1) return;
+    const provider = data.slice(0, slash);
+    const modelId = data.slice(slash + 1);
+
+    gateway.sendPi({ type: "set_model", provider, modelId });
+    await ctx.answerCallbackQuery(`✅ Switched to ${provider}/${modelId}.`);
+    await ctx.editMessageText(`✅ Model: ${provider}/${modelId}`);
+  });
+
   bot.on("message:text", async (ctx) => {
     await gateway.handleTextMessage(ctx, ctx.api);
   });
@@ -739,6 +856,7 @@ if (import.meta.main) {
     { command: "resume",    description: "Switch to a previous session" },
     { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "name",      description: "Set a display name for the current session" },
+    { command: "model",     description: "List / filter available models, or switch model" },
     { command: "quit",      description: "Exit the daemon" },
   ]);
 

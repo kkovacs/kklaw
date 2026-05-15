@@ -977,6 +977,203 @@ describe("Gateway.showLastMessage (/last)", () => {
   });
 });
 
+describe("Gateway.showModels", () => {
+  it("formats all models as HTML <pre> when no filter set", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const data = {
+      models: [
+        { provider: "anthropic", id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", contextWindow: 200000, input: ["text", "image"], cost: { input: 3, output: 15 } },
+        { provider: "opencode-go", id: "minimax-m2.5", name: "MiniMax M2.5", contextWindow: 256000, input: ["text"], cost: { input: 0.5, output: 2 } },
+      ],
+    };
+
+    await gateway.showModels(456, data);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(456);
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("</pre>");
+    expect(messages[0]!.text).toContain("Available models (2)");
+    expect(messages[0]!.text).toContain("anthropic/claude-sonnet-4-20250514");
+    expect(messages[0]!.text).toContain("Claude Sonnet 4");
+    expect(messages[0]!.text).toContain("200K");
+    expect(messages[0]!.text).toContain("📝🏙️");
+    expect(messages[0]!.text).toContain("$3/15");
+    expect(messages[0]!.text).toContain("opencode-go/minimax-m2.5");
+    expect(messages[0]!.text).toContain("256K");
+    expect(messages[0]!.text).toContain("📝");
+    expect(messages[0]!.text).toContain("$0.5/2");
+  });
+
+  it("shows filtered buttons when modelFilter is set", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.modelFilter = "claUde"; // case-insensitive
+
+    const data = {
+      models: [
+        { provider: "anthropic", id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
+        { provider: "opencode-go", id: "minimax-m2.5", name: "MiniMax M2.5" },
+      ],
+    };
+
+    await gateway.showModels(456, data);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(456);
+    expect(messages[0]!.text).toContain('"claude"');
+    const ik = (messages[0] as any).other?.reply_markup?.inline_keyboard;
+    expect(ik).toBeDefined();
+    expect(ik.length).toBe(1);
+    expect(ik[0][0].text).toBe("anthropic/claude-sonnet-4-20250514");
+    expect(ik[0][0].callback_data).toBe("model:anthropic/claude-sonnet-4-20250514");
+    expect(gateway.modelFilter).toBeUndefined();
+  });
+
+  it("filters by model id as well as name", async () => {
+    const messages: any[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, _t, other) => { messages.push(other); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.modelFilter = "minimax";
+
+    const data = {
+      models: [
+        { provider: "opencode-go", id: "minimax-m2.5", name: "MiniMax M2.5" },
+        { provider: "anthropic", id: "claude-sonnet-4", name: "Claude Sonnet 4" },
+      ],
+    };
+
+    await gateway.showModels(1, data);
+
+    const ik = (messages[0] as any)?.reply_markup?.inline_keyboard;
+    expect(ik).toBeDefined();
+    expect(ik.length).toBe(1);
+    expect(ik[0][0].text).toBe("opencode-go/minimax-m2.5");
+  });
+
+  it("shows no-match message when filter matches nothing", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.modelFilter = "nonexistent";
+
+    const data = { models: [{ provider: "x", id: "y", name: "Test" }] };
+
+    await gateway.showModels(1, data);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe('No models matching "nonexistent".');
+    expect(gateway.modelFilter).toBeUndefined();
+  });
+
+  it("shows empty message when no models available", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showModels(1, { models: [] });
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe("No models available.");
+  });
+
+  it("shows emoji for image, audio, video modalities", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const data = {
+      models: [
+        { provider: "x", id: "multi", name: "Multi", contextWindow: 100000, input: ["text", "image", "audio", "video"], cost: { input: 1, output: 2 } },
+      ],
+    };
+
+    await gateway.showModels(1, data);
+
+    expect(messages[0]!.text).toContain("📝🏙️🎤🎬");
+    expect(messages[0]!.text).toContain("100K");
+    expect(messages[0]!.text).toContain("$1/2");
+  });
+
+  it("handles models with missing optional fields", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const data = {
+      models: [{ provider: "x", id: "y" }],
+    };
+
+    await gateway.showModels(1, data);
+
+    expect(messages[0]!.text).toContain("x/y — y");
+    expect(messages[0]!.text).toContain("?");
+  });
+
+  it("splits into multiple messages when list exceeds Telegram limit", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const longName = "A".repeat(100);
+    const models: any[] = [];
+    for (let i = 0; i < 40; i++) {
+      models.push({
+        provider: "p",
+        id: `m${i}`,
+        name: longName,
+        contextWindow: 100000,
+        input: ["text"],
+        cost: { input: 1, output: 2 },
+      });
+    }
+
+    await gateway.showModels(1, { models });
+
+    expect(messages.length).toBeGreaterThan(1);
+    for (const msg of messages) {
+      expect(msg.text).toContain("<pre>");
+      expect(msg.text).toContain("</pre>");
+    }
+    expect(messages[0]!.text).toContain("Available models (40)");
+  });
+});
+
 describe("Gateway.handlePiEvent command routing", () => {
   it("routes get_state response to showStatus when lastChatId is set", async () => {
     const messages: { text: string }[] = [];
@@ -1061,6 +1258,41 @@ describe("Gateway.handlePiEvent command routing", () => {
 
     gateway.handlePiEvent(JSON.parse(`
       {"type":"response","command":"new_session","success":true,"data":{"cancelled":false}}
+    `));
+
+    expect(called).toBe(false);
+  });
+
+  it("routes get_available_models response to showModels when lastChatId is set", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"x","id":"y","name":"Test","contextWindow":100000,"input":["text"],"cost":{"input":1,"output":2}}]}}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("x/y");
+    expect(messages[0]!.text).toContain("Test");
+  });
+
+  it("does NOT route get_available_models response when lastChatId is 0", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 0;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"get_available_models","success":true,"data":{"models":[]}}
     `));
 
     expect(called).toBe(false);
