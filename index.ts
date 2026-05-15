@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createRelay, type Relay } from "./relay";
+import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
 
@@ -92,10 +92,12 @@ function createSafeEditor(
   chatId: number | string,
   firstMessageId: number,
   log?: (msg: string) => void,
+  rawMode?: boolean,
 ) {
   const messageIds: number[] = [firstMessageId];
   const lastGoodTexts: string[] = [""];
   let frozenLength = 0;
+  const mdOpts = rawMode ? undefined : ({ parse_mode: "MarkdownV2" as const });
 
   function errMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
@@ -139,7 +141,7 @@ function createSafeEditor(
 
   async function rollbackLastMessage(messageId: number, goodText: string): Promise<void> {
     try {
-      await api.editMessageText(chatId, messageId, goodText, { parse_mode: "MarkdownV2" });
+      await api.editMessageText(chatId, messageId, goodText, mdOpts);
     } catch (err) {
       if (isNotModifiedError(err)) return;
       if (isParseError(err)) {
@@ -156,14 +158,11 @@ function createSafeEditor(
     }
   }
 
-  async function sendChunk(text: string, parseMode: boolean): Promise<{ message_id: number }> {
+  async function sendChunk(text: string): Promise<{ message_id: number }> {
     try {
-      if (parseMode) {
-        return await api.sendMessage(chatId, text, { parse_mode: "MarkdownV2" });
-      }
-      return await api.sendMessage(chatId, text);
+      return await api.sendMessage(chatId, text, mdOpts);
     } catch (err) {
-      if (parseMode && isParseError(err)) {
+      if (!rawMode && isParseError(err)) {
         return await api.sendMessage(chatId, text);
       }
       throw err;
@@ -177,7 +176,7 @@ function createSafeEditor(
       const lastMessageId = messageIds[lastIndex];
 
       try {
-        await api.editMessageText(chatId, lastMessageId, candidate, { parse_mode: "MarkdownV2" });
+        await api.editMessageText(chatId, lastMessageId, candidate, mdOpts);
         lastGoodTexts[lastIndex] = candidate;
       } catch (err) {
         if (isNotModifiedError(err)) {
@@ -208,7 +207,7 @@ function createSafeEditor(
             const chunk = chunks[i];
             const isLastChunk = i === chunks.length - 1;
             try {
-              const sent = await sendChunk(chunk, true);
+              const sent = await sendChunk(chunk);
               messageIds.push(sent.message_id);
               lastGoodTexts.push(chunk);
               if (!isLastChunk) {
@@ -253,6 +252,7 @@ export class Gateway {
   currentPlaceholderMessageId: number = 0;
   lastPiError?: string;
   showThinking = false;
+  rawMode = false;
   sessionPicker: Map<string, SessionInfo> = new Map();
   allowedUserId: number;
   api: TelegramApi;
@@ -383,13 +383,14 @@ export class Gateway {
     const placeholder = await api.sendMessage(chatId, "...");
     this.currentPlaceholderMessageId = placeholder.message_id;
 
-    const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg));
+    const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg), this.rawMode);
 
     this.currentRelay = createRelay({
       edit: (buf, isFinal) =>
         editor.edit(buf, isFinal).catch((err: Error) =>
           console.error(`[telegram] edit failed: ${err.message}`),
         ),
+      rawMode: this.rawMode,
       log: (msg) => dbg(1, msg),
     });
 
@@ -464,6 +465,11 @@ export class Gateway {
     );
   }
 
+  formatForTelegram(rawText: string): { text: string; other?: Record<string, unknown> } {
+    if (this.rawMode) return { text: rawText };
+    return { text: escapeText(rawText), other: { parse_mode: "MarkdownV2" } };
+  }
+
   async showLastMessage(chatId: number | string, data: unknown): Promise<void> {
     const d = data as Record<string, unknown> | undefined;
     if (!d) return;
@@ -474,7 +480,8 @@ export class Gateway {
       );
       return;
     }
-    await this.api.sendMessage(chatId, text).catch((err: Error) =>
+    const msg = this.formatForTelegram(text);
+    await this.api.sendMessage(chatId, msg.text, msg.other).catch((err: Error) =>
       console.error(`[telegram] showLastMessage failed: ${err.message}`),
     );
   }
@@ -638,6 +645,34 @@ if (import.meta.main) {
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
   });
 
+  bot.command("raw", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    const kb = new InlineKeyboard()
+      .text(gateway.rawMode ? "✅ Raw" : "Raw", "raw:on")
+      .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "raw:off");
+    await ctx.reply("Output format:", { reply_markup: kb });
+  });
+
+  bot.callbackQuery("raw:on", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.rawMode = true;
+    await ctx.answerCallbackQuery("Raw mode. No formatting.");
+    const kb = new InlineKeyboard()
+      .text("✅ Raw", "raw:on")
+      .text("MarkdownV2", "raw:off");
+    await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  });
+
+  bot.callbackQuery("raw:off", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.rawMode = false;
+    await ctx.answerCallbackQuery("MarkdownV2 mode.");
+    const kb = new InlineKeyboard()
+      .text("Raw", "raw:on")
+      .text("✅ MarkdownV2", "raw:off");
+    await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  });
+
   bot.command("name", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
 
@@ -699,6 +734,29 @@ if (import.meta.main) {
   bot.on("message:text", async (ctx) => {
     await gateway.handleTextMessage(ctx, ctx.api);
   });
+
+  // Clear any chat-scoped commands from other bots (chat-scope overrides global scope)
+  const chatScoped = await bot.api.getMyCommands({
+    scope: { type: "chat", chat_id: allowedUserId },
+  });
+  if (chatScoped.length > 0) {
+    await bot.api.deleteMyCommands({
+      scope: { type: "chat", chat_id: allowedUserId },
+    });
+    console.error("[cmd] cleared stale chat-scoped commands:", chatScoped.map(c => c.command));
+  }
+
+  await bot.api.setMyCommands([
+    { command: "new",       description: "Start a new session" },
+    { command: "status",    description: "Show session state (model, messages, thinking)" },
+    { command: "context",   description: "Show token usage & cost stats" },
+    { command: "last",      description: "Show last assistant response text" },
+    { command: "showthink", description: "Toggle thinking block visibility" },
+    { command: "raw",       description: "Toggle raw/MarkdownV2 message formatting" },
+    { command: "resume",    description: "Switch to a previous session" },
+    { command: "name",      description: "Set a display name for the current session" },
+  ]);
+
 
   spawnPi();
   bot.start({

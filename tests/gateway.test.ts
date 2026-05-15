@@ -441,8 +441,8 @@ describe("Gateway.showLastMessage (/last)", () => {
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.chatId).toBe(456);
-    expect(messages[0]!.text).toBe("Got it, just testing the waters.");
-    expect(messages[0]!.other).toBeUndefined();
+    expect(messages[0]!.text).toBe("Got it, just testing the waters\\.");
+    expect(messages[0]!.other).toEqual({ parse_mode: "MarkdownV2" });
   });
 
   it("sends placeholder when text is null (no assistant messages yet)", async () => {
@@ -636,9 +636,9 @@ describe("Integration: replay command responses", () => {
     }
 
     expect(messages.length).toBe(1);
-    expect(messages[0]!.other).toBeUndefined();
-    expect(messages[0]!.text).toContain("Got it, just testing the waters.");
-    expect(messages[0]!.text).toContain("Ready when you need me for anything kklaw-related!");
+    expect(messages[0]!.other).toEqual({ parse_mode: "MarkdownV2" });
+    expect(messages[0]!.text).toContain("Got it, just testing the waters\\.");
+    expect(messages[0]!.text).toContain("Ready when you need me for anything kklaw\\-related\\!");
   });
 });
 
@@ -848,6 +848,6 @@ describe("Integration: /resume then /last", () => {
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.chatId).toBe(789);
-    expect(messages[0]!.text).toBe("The auth bug is fixed.");
+    expect(messages[0]!.text).toBe("The auth bug is fixed\\.");
   });
 });

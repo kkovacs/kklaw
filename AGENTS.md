@@ -29,8 +29,9 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 | `/new` | `new_session` | logs response; also cancels relay + resets state via `resetSession()` |
 | `/status` | `get_state` | `showStatus()` → formats into `<pre>` HTML block |
 | `/context` | `get_session_stats` | `showStats()` → formats token counts (K/M) + cost into `<pre>` HTML block |
-| `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text as plain message |
+| `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text with MarkdownV2 escaping (via `formatForTelegram()`); raw mode sends plain |
 | `/showthink` | (none) | toggles `showThinking` via inline keyboard (Yes/No) |
+| `/raw` | (none) | toggles `rawMode` via inline keyboard (Raw / MarkdownV2); controls escaping + `parse_mode` for streaming and `/last` |
 | `/resume` | (none; filesystem scan) | scans `~/.pi/agent/sessions/` for recent `.jsonl` session files, shows inline keyboard |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 
@@ -58,6 +59,7 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
   - **`-v`**: events/states + terse error context (`stopReason=error`, `messages=3`, etc.).
   - **`-vv`**: full JSON of every event (`[pi] event JSON: ...`) plus raw stdout lines (`pi stdout: ...`).
 - **`drop_pending_updates: true`**: avoids processing stale Telegram messages on restart.
+- **Command registration via `setMyCommands`**: on startup, clears any stale chat-scoped commands (e.g. from other bots sharing the same user), then registers global commands. Telegram precedence: chat-scope > default-scope — without cleanup, another bot's chat-scoped commands would hide kklaw's.
 
 ### Known gaps (marked `XXX` in code)
 
@@ -117,10 +119,11 @@ bun test           # run tests
   - `agent_end` → `await relay.onDone()`. If relay produced no content and an error was captured, edits the placeholder message with the error text. Then `processQueue()`.
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
-- `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command.
+- `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command and session switching.
+- `formatForTelegram(rawText)` — centralizes MarkdownV2 escaping + `parse_mode` for one-shot messages. Returns `{ text, other? }`. In raw mode: plain text, no `parse_mode`. In MarkdownV2 mode: `escapeText()` escaped text + `{ parse_mode: "MarkdownV2" }`. Used by `showLastMessage`; apply to any future one-shot text site.
 - `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking).
 - `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost).
-- `showLastMessage(chatId, data)` — sends `get_last_assistant_text` response as a plain Telegram message (no parse_mode). Falls back to `"(No assistant messages yet.)"` when text is null.
+- `showLastMessage(chatId, data)` — sends `get_last_assistant_text` response via `formatForTelegram()`. Falls back to `"(No assistant messages yet.)"` when text is null.
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
 - `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
@@ -128,16 +131,18 @@ bun test           # run tests
 - `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
 - `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
 
-**Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, starts long polling. Not executed when imported for tests.
+**Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, registers bot commands with Telegram via `bot.api.setMyCommands()` (so they appear in the `/` autocomplete menu), starts long polling. Not executed when imported for tests.
 
 ### `relay.ts`
 
-**`createRelay({ edit, debounceMs?, log? })` → `{ onDelta, onDone, cancel }`**
+**`createRelay({ edit, debounceMs?, rawMode?, log? })` → `{ onDelta, onDone, cancel }`**
 
 Pure function. Holds `segments`, `currentKind`, `currentText` and `editTimer` in closure.
 - `onDelta(text, kind?)` — appends to current segment. On kind change (`'text'` ↔ `'thinking'`), pushes current to `segments[]` and starts a new one. Schedules debounced `edit()` call (default 600ms).
-- `onDone()` — cancels timer, finalizes last segment, builds MarkdownV2 string: thinking segments → strict escape (`escapeMdV2`) + `> ` prefix per line; text segments → relaxed escape (`escapeText`, lets `*` `_` `` ` `` through). Calls `edit(text, true)` so `createSafeEditor` knows this is the final edit and can fall back to plain text on parse errors. Returns `Promise<boolean>`: `true` if content was edited, `false` if buffer was empty. Clears all state.
+- `onDone()` — cancels timer, finalizes last segment, builds output string. Thinking segments: `> ` prefix per line. Escaping depends on `rawMode`: if false (default, MarkdownV2), thinking gets strict escape (`escapeMdV2`) and text gets relaxed escape (`escapeText`, lets `*` `_` `` ` `` through); if true (raw), no escaping applied, `> ` prefix only. Calls `edit(text, true)`. Returns `Promise<boolean>`: `true` if content was edited, `false` if buffer was empty. Clears all state.
 - `cancel()` — clears timer and all segments/buffer without a final edit. Used by `resetSession()` before `/new`.
+
+Also exports `escapeText(s: string): string` — relaxed MarkdownV2 escape that preserves `*`, `_`, `` ` ``. Used by `Gateway.formatForTelegram()` for `/last` and future one-shot messages.
 
 ### `pi-client.ts`
 
@@ -192,7 +197,7 @@ Telegram command (e.g. /resume)
       → walks ~/.pi/agent/sessions/ recursively for .jsonl files
       → validates session header, extracts id/timestamp/name
       → sorts by file mtime, populates gateway.sessionPicker map
-    → builds InlineKeyboard: one button per session (label: "2026-04-12 15:40 - fix-auth-bug")
+    → builds InlineKeyboard: one button per session (label: "2026-04-12 15:40 - fix-auth-bug" or "... - <last12-chars-of-uuid>")
       → callback_data: "resume:<uuid>" (fits in 64-byte limit)
     → ctx.reply("Resume a session:", { reply_markup: kb })
 
@@ -211,6 +216,12 @@ Telegram command (e.g. /name)
     → if empty: ctx.reply("Usage: /name <name>")
     → sendPi({ type: "set_session_name", name })
     → ctx.reply("Named.")
+
+Telegram command (e.g. /raw)
+  → bot.command("raw", handler)
+    → shows inline keyboard: Raw / MarkdownV2 with current state checked
+  → bot.callbackQuery("raw:on") → gateway.rawMode = true (next session: no escaping, plain text)
+  → bot.callbackQuery("raw:off") → gateway.rawMode = false (default: full MarkdownV2 escaping)
 
 Telegram command (e.g. /status)
   → bot.command("status", handler)

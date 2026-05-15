@@ -16,13 +16,14 @@ function escapeMdV2(s: string): string {
   return s.replace(MDV2_ESCAPE, '\\$1');
 }
 
-function escapeText(s: string): string {
+export function escapeText(s: string): string {
   return s.replace(MDV2_ESCAPE_TEXT, '\\$1');
 }
 
 export function createRelay(opts: {
   edit(text: string, isFinal?: boolean): Promise<unknown>;
   debounceMs?: number;
+  rawMode?: boolean;
   log?(msg: string): void;
 }): Relay {
   type Segment = { kind: 'text' | 'thinking'; text: string };
@@ -43,13 +44,13 @@ export function createRelay(opts: {
       if (seg.kind === 'thinking') {
         // Ensure blockquote `> ` lands at line start
         if (out && !out.endsWith('\n')) out += '\n';
-        const escaped = escapeMdV2(seg.text);
-        const lines = escaped.split('\n');
+        const text = opts.rawMode ? seg.text : escapeMdV2(seg.text);
+        const lines = text.split('\n');
         for (const line of lines) {
           out += '>' + (line ? ' ' + line : '') + '\n';
         }
       } else {
-        out += escapeText(seg.text);
+        out += opts.rawMode ? seg.text : escapeText(seg.text);
       }
     }
     return out;
