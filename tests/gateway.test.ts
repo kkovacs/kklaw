@@ -219,6 +219,100 @@ describe("Gateway.handlePiEvent", () => {
     expect(gateway.queue.length).toBe(0);
   });
 
+  it("sends tool summary on agent_end with tool counts", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0; // ignore "..." placeholder
+
+    gateway.handlePiEvent({ type: "turn_start" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "read" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "write" });
+    gateway.handlePiEvent({ type: "turn_end" });
+    await gateway.handlePiEvent({ type: "agent_end" });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe("\uD83D\uDD27 5 tools used: bash \u00d73, read, write");
+  });
+
+  it("sends no tool summary when no tools were called", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    gateway.handlePiEvent({ type: "turn_start" });
+    gateway.handlePiEvent({ type: "turn_end" });
+    await gateway.handlePiEvent({ type: "agent_end" });
+
+    expect(sent.length).toBe(0);
+  });
+
+  it("accumulates tool counts across multiple turns", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    gateway.handlePiEvent({ type: "turn_start" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "read" });
+    gateway.handlePiEvent({ type: "turn_end" });
+
+    gateway.handlePiEvent({ type: "turn_start" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "grep" });
+    gateway.handlePiEvent({ type: "turn_end" });
+
+    await gateway.handlePiEvent({ type: "agent_end" });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toBe("\uD83D\uDD27 4 tools used: bash \u00d72, grep, read");
+  });
+
+  it("clears tool counts after agent_end sends summary", async () => {
+    const gateway = new Gateway({
+      allowedUserId: 1,
+      api: {
+        sendMessage: async () => ({ message_id: 100 }),
+        editMessageText: async () => ({}),
+      },
+    });
+    await gateway.startPiSession(123, "test");
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    await gateway.handlePiEvent({ type: "agent_end" });
+
+    expect(gateway.turnToolCounts.size).toBe(0);
+  });
+
+  it("clears turnToolCounts on resetSession", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    expect(gateway.turnToolCounts.size).toBe(1);
+
+    gateway.resetSession();
+    expect(gateway.turnToolCounts.size).toBe(0);
+  });
+
   it("bubbles Pi errors to Telegram when stream produces no content", async () => {
     const edits: { chatId: number | string; messageId: number; text: string }[] = [];
     const api: TelegramApi = {

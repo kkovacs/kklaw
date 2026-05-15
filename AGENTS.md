@@ -17,7 +17,7 @@ Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.
 2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`
 3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
-5. On `agent_end` → final edit, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
+5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
 
 #### Slash commands (Telegram → Pi RPC)
@@ -64,7 +64,6 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 ### Known gaps (marked `XXX` in code)
 
 - Extension UI dialogs (`select`, `confirm`, `input`, `editor`) not forwarded to user yet
-- `tool_execution_*` events not displayed
 - Message queue is in-memory only — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
 - Other builtin slash commands (`/model`, `/compact`, `/fork`, `/clone`, etc.) not registered yet
@@ -116,7 +115,8 @@ bun test           # run tests
   - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
   - `message_update` with `error` → logs to stderr immediately (always, even without `-v`)
   - `message_end` with `stopReason === "error"` → captures `errorMessage` for later
-  - `agent_end` → `await relay.onDone()`. If relay produced no content and an error was captured, edits the placeholder message with the error text. Then `processQueue()`.
+  - `tool_execution_start` → counts tool calls by `toolName` in `turnToolCounts` map (accumulated across all turns).
+  - `agent_end` → `await relay.onDone()`. Sends tool summary message (`"🔧 N tools used: bash ×3, read"`) if any tools were counted. If relay produced no content and an error was captured, edits the placeholder message with the error text. Then `processQueue()`.
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
 - `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command and session switching.
@@ -127,6 +127,7 @@ bun test           # run tests
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
 - `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
+- `turnToolCounts: Map<toolName, count>` — accumulates tool calls via `tool_execution_start` events during an agent run. Cleared at `agent_end` (after sending summary) and `resetSession()`.
 - `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()` and `resume:` callback.
 - `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
 - `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
@@ -174,7 +175,7 @@ Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSe
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
@@ -244,11 +245,13 @@ pi stdout
           → [OK] → api.editMessageText(lastMsg, buf, { parse_mode: "MarkdownV2" })
           → [too long] → rollback + api.sendMessage(chunks, { parse_mode: "MarkdownV2" })
           → [parse error, streaming] → skip, retry later
+      → [tool_execution_start] → gateway.turnToolCounts.set(name, (count ?? 0) + 1)
       → [agent_end] → await relay.onDone() → boolean hadContent
         → [hadContent=true] → createSafeEditor.edit(final, isFinal=true)
           → [OK] → api.editMessageText(lastMsg, final, { parse_mode: "MarkdownV2" })
           → [parse error, final] → api.editMessageText(lastMsg, final) // plain text
         → [hadContent=false && lastPiError] → api.editMessageText(placeholder, `Error: ${lastPiError}`)
+        → [turnToolCounts.size > 0] → api.sendMessage("🔧 N tools used: ...") + clear map
         → Gateway.processQueue()
           → [if queued] Gateway.startPiSession(next)
 ```

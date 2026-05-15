@@ -64,6 +64,7 @@ interface PiEvent {
     stopReason?: string;
     errorMessage?: string;
   }>;
+  toolName?: string;
 }
 
 // ============================================================
@@ -251,6 +252,7 @@ export class Gateway {
   currentChatId: number | string = 0;
   currentPlaceholderMessageId: number = 0;
   lastPiError?: string;
+  turnToolCounts: Map<string, number> = new Map();
   showThinking = false;
   rawMode = false;
   sessionPicker: Map<string, SessionInfo> = new Map();
@@ -352,6 +354,19 @@ export class Gateway {
         }
       }
 
+      if (this.turnToolCounts.size > 0 && this.currentChatId) {
+        const entries = [...this.turnToolCounts.entries()];
+        entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+        const total = entries.reduce((s, [, c]) => s + c, 0);
+        const parts = entries.map(([n, c]) => c > 1 ? `${n} \u00d7${c}` : n);
+        const text = `\uD83D\uDD27 ${total} tools used: ${parts.join(', ')}`;
+        this.turnToolCounts.clear();
+        this.api.sendMessage(this.currentChatId, text)
+          .catch((err) => {
+            console.error(`[telegram] tool summary send failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+      }
+
       this.currentRelay = null;
       this.lastPiError = undefined;
       this.currentChatId = 0;
@@ -360,7 +375,15 @@ export class Gateway {
       return;
     }
 
-    // XXX: other events not handled yet (tool_execution, extension_ui, etc.)
+    if (type === "tool_execution_start") {
+      const toolName = (event as PiEvent).toolName;
+      if (toolName && typeof toolName === 'string') {
+        this.turnToolCounts.set(toolName, (this.turnToolCounts.get(toolName) ?? 0) + 1);
+      }
+      return;
+    }
+
+    // XXX: other events not handled yet (extension_ui, etc.)
     dbg(1, `unhandled pi event type: ${type}`);
   };
 
@@ -410,6 +433,7 @@ export class Gateway {
     this.currentRelay?.cancel();
     this.currentRelay = null;
     this.piStreaming = false;
+    this.turnToolCounts.clear();
     this.queue = [];
     this.currentChatId = 0;
     this.currentPlaceholderMessageId = 0;
