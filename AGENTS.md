@@ -27,15 +27,16 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 | Telegram command | RPC command | Response handler |
 |------------------|-------------|------------------|
 | `/new` | `new_session` | logs response; also cancels relay + resets state via `resetSession()` |
-| `/status` | `get_state` | `showStatus()` → formats into `<pre>` HTML block |
-| `/context` | `get_session_stats` | `showStats()` → formats token counts (K/M) + cost into `<pre>` HTML block |
+| `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` → two response messages, both `<pre>` HTML |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text with MarkdownV2 escaping (via `formatForTelegram()`); raw mode sends plain |
+| `/status` | (none) | `showDaemonStatus()` → self-contained, no RPC: uptime, Pi connection/pid, streaming state, queue depth, toggle states |
 | `/showthink` | (none) | toggles `showThinking` via inline keyboard (Yes/No) |
 | `/showtools` | (none) | toggles `showTools` via inline keyboard (On/Off); when On, sends a `<pre>` HTML message per tool call with truncated `JSON.stringify(args)` |
 | `/showraw` | (none) | toggles `rawMode` via inline keyboard (Raw / MarkdownV2); controls escaping + `parse_mode` for streaming and `/last` |
 | `/resume` | (none; filesystem scan) | scans `~/.pi/agent/sessions/` for recent `.jsonl` session files, shows inline keyboard |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
-| `/delete` | `get_state` → `unlink` → `new_session` | async: sends `get_state`, finds session file in `sessionPicker` by `sessionId`, deletes the `.jsonl` file via `fs.unlink`, calls `resetSession()` + `new_session`, replies "Session deleted. New session started." Falls back gracefully if session not found or file is missing.
+| `/delete` | `get_state` → `unlink` → `new_session` | async: sends `get_state`, finds session file in `sessionPicker` by `sessionId`, deletes the `.jsonl` file via `fs.unlink`, calls `resetSession()` + `new_session`, replies "Session deleted. New session started." Falls back gracefully if session not found or file is missing. |
+| `/quit` | (none) | replies "Bye" then `process.exit(0)` |
 
 ### Key design decisions
 
@@ -63,6 +64,7 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
   - **`-vv`**: full JSON of every event (`[pi] event JSON: ...`) plus raw stdout lines (`pi stdout: ...`).
 - **`drop_pending_updates: true`**: avoids processing stale Telegram messages on restart.
 - **Command registration via `setMyCommands`**: on startup, clears any stale chat-scoped commands (e.g. from other bots sharing the same user), then registers global commands. Telegram precedence: chat-scope > default-scope — without cleanup, another bot's chat-scoped commands would hide kklaw's.
+- **grammy handler ordering matters**: `bot.on("message:text")` catches all text messages — including `/commands`. All `bot.command()` handlers **must** be registered before the catch-all `bot.on("message:text")`, or they'll never fire.
 
 ### Known gaps (marked `XXX` in code)
 
@@ -127,9 +129,11 @@ bun test           # run tests
 - `htmlEscape(s)` — escapes `&`, `<`, `>` for HTML `parse_mode` messages.
 - `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command and session switching.
 - `formatForTelegram(rawText)` — centralizes MarkdownV2 escaping + `parse_mode` for one-shot messages. Returns `{ text, other? }`. In raw mode: plain text, no `parse_mode`. In MarkdownV2 mode: `escapeText()` escaped text + `{ parse_mode: "MarkdownV2" }`. Used by `showLastMessage`; apply to any future one-shot text site.
-- `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking).
-- `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost).
+- `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking). Used by `/session` command.
+- `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost). Used by `/session` command.
+- `showDaemonStatus(chatId)` — self-contained: formats daemon health into `<pre>` HTML (uptime, Pi status/pid, streaming state, queue depth, toggle states). Used by `/status` command. Reads `startedAt` field for uptime calculation.
 - `showLastMessage(chatId, data)` — sends `get_last_assistant_text` response via `formatForTelegram()`. Falls back to `"(No assistant messages yet.)"` when text is null.
+- `startedAt: Date` — set in constructor; used by `showDaemonStatus()` for uptime display.
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
 - `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
@@ -185,7 +189,7 @@ Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSe
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
@@ -249,15 +253,31 @@ Telegram command (e.g. /showraw)
   → bot.callbackQuery("showraw:on") → gateway.rawMode = true (next session: no escaping, plain text)
   → bot.callbackQuery("showraw:off") → gateway.rawMode = false (default: full MarkdownV2 escaping)
 
-Telegram command (e.g. /status)
-  → bot.command("status", handler)
+Telegram command (e.g. /session)
+  → bot.command("session", handler)
     → [auth check]
     → gateway.lastChatId = ctx.chatId
     → sendPi({ type: "get_state" })
-  ... (loose coupling: response arrives later)
+    → sendPi({ type: "get_session_stats" })
+  ... (loose coupling: two responses arrive)
   → Gateway.handlePiEvent()
     → [response, command="get_state"] → showStatus(lastChatId, data)
       → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
+    → [response, command="get_session_stats"] → showStats(lastChatId, data)
+      → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
+
+Telegram command (e.g. /status)
+  → bot.command("status", handler)
+    → [auth check]
+    → gateway.showDaemonStatus(ctx.chatId)
+      → formats uptime from Date.now() - startedAt, Pi connection/pid, streaming state, queue depth, toggles
+      → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
+
+Telegram command (e.g. /quit)
+  → bot.command("quit", handler)
+    → [auth check]
+    → ctx.reply("Bye!")
+    → process.exit(0)
 
 pi stdout
   → createPiClient attachJsonlReader

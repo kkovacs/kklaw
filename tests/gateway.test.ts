@@ -765,7 +765,7 @@ describe("Gateway.showStatus", () => {
   });
 });
 
-describe("Gateway.showStats (/context)", () => {
+describe("Gateway.showStats", () => {
   it("formats get_session_stats response as HTML <pre> and sends message", async () => {
     const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
     const api: TelegramApi = {
@@ -829,6 +829,100 @@ describe("Gateway.showStats (/context)", () => {
     expect(messages[0]!.text).toContain("2.0M"); // 2.0M output
     expect(messages[0]!.text).toContain("3.5M"); // 3.5M total
     expect(messages[0]!.text).toContain("$5.0000");
+  });
+});
+
+describe("Gateway.showDaemonStatus", () => {
+  it("formats daemon status as HTML <pre> and sends message", async () => {
+    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, other) => {
+        messages.push({ chatId, text, other });
+        return { message_id: 1 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showDaemonStatus(456);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(456);
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("</pre>");
+    expect(messages[0]!.text).toContain("Kklaw Daemon");
+    expect(messages[0]!.text).toContain("Uptime:");
+    expect(messages[0]!.text).toContain("not connected");
+    expect(messages[0]!.text).toContain("idle");
+    expect(messages[0]!.text).toContain("Queue depth:");
+    expect(messages[0]!.text).toContain("Thinking:");
+    expect(messages[0]!.text).toContain("Show tools:");
+    expect(messages[0]!.text).toContain("Raw mode:");
+  });
+
+  it("shows running Pi with pid when piClient is connected", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.piClient = { pid: 12345, send: () => {}, close: () => {} };
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("running (pid=12345)");
+  });
+
+  it("shows busy when piStreaming is true", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.piStreaming = true;
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("busy");
+  });
+
+  it("shows queue depth when messages are queued", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.queue = [{ chatId: 123, text: "a" }, { chatId: 123, text: "b" }, { chatId: 123, text: "c" }];
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("Queue depth:  3");
+  });
+
+  it("shows toggle states on/off correctly", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.showThinking = true;
+    gateway.showTools = true;
+    gateway.rawMode = true;
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("Thinking:     on");
+    expect(messages[0]!.text).toContain("Show tools:   on");
+    expect(messages[0]!.text).toContain("Raw mode:     on");
   });
 });
 
@@ -902,7 +996,7 @@ describe("Gateway.handlePiEvent command routing", () => {
     expect(messages[0]!.text).toContain("sid");
   });
 
-  it("routes get_session_stats response to showStats (/context) when lastChatId is set", async () => {
+  it("routes get_session_stats response to showStats when lastChatId is set", async () => {
     const messages: { text: string }[] = [];
     const api: TelegramApi = {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },

@@ -281,6 +281,7 @@ export class Gateway {
   allowedUserId: number;
   api: TelegramApi;
   deleteFile: (path: string) => Promise<void> = unlink;
+  startedAt = new Date();
 
   constructor(options: { allowedUserId: number; api: TelegramApi }) {
     this.allowedUserId = options.allowedUserId;
@@ -559,6 +560,33 @@ export class Gateway {
     );
   }
 
+  async showDaemonStatus(chatId: number | string): Promise<void> {
+    const now = Date.now();
+    const uptimeMs = now - this.startedAt.getTime();
+    const uptimeH = Math.floor(uptimeMs / 3600000);
+    const uptimeM = Math.floor((uptimeMs % 3600000) / 60000);
+    const uptimeS = Math.floor((uptimeMs % 60000) / 1000);
+    const uptimeStr = `${uptimeH}h ${String(uptimeM).padStart(2, "0")}m ${String(uptimeS).padStart(2, "0")}s`;
+    const piStatus = this.piClient
+      ? `running (pid=${this.piClient.pid ?? "?"})`
+      : "not connected";
+    const streaming = this.piStreaming ? "busy" : "idle";
+    const lines = [
+      `🖥️ Kklaw Daemon`,
+      `⏱️ Uptime:        ${uptimeStr}`,
+      `🔄 Pi:           ${piStatus}`,
+      `📡 Pi streaming: ${streaming}`,
+      `📋 Queue depth:  ${this.queue.length}`,
+      `💭 Thinking:     ${this.showThinking ? "on" : "off"}`,
+      `🔧 Show tools:   ${this.showTools ? "on" : "off"}`,
+      `📝 Raw mode:     ${this.rawMode ? "on" : "off"}`,
+    ];
+    const text = `<pre>${lines.join("\n")}</pre>`;
+    await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
+      console.error(`[telegram] showDaemonStatus failed: ${err.message}`),
+    );
+  }
+
   formatForTelegram(rawText: string): { text: string; other?: Record<string, unknown> } {
     if (this.rawMode) return { text: rawText };
     return { text: escapeText(rawText), other: { parse_mode: "MarkdownV2" } };
@@ -695,13 +723,13 @@ if (import.meta.main) {
 
   bot.command("status", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
-    gateway.lastChatId = ctx.chatId;
-    gateway.sendPi({ type: "get_state" });
+    await gateway.showDaemonStatus(ctx.chatId);
   });
 
-  bot.command("context", async (ctx) => {
+  bot.command("session", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.lastChatId = ctx.chatId;
+    gateway.sendPi({ type: "get_state" });
     gateway.sendPi({ type: "get_session_stats" });
   });
 
@@ -860,6 +888,12 @@ if (import.meta.main) {
     );
   });
 
+  bot.command("quit", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    await ctx.reply("👋 Bye!");
+    process.exit(0);
+  });
+
   bot.on("message:text", async (ctx) => {
     await gateway.handleTextMessage(ctx, ctx.api);
   });
@@ -877,8 +911,9 @@ if (import.meta.main) {
 
   await bot.api.setMyCommands([
     { command: "new",       description: "Start a new session" },
-    { command: "status",    description: "Show session state (model, messages, thinking)" },
-    { command: "context",   description: "Show token usage & cost stats" },
+    { command: "status",    description: "Show daemon status (uptime, Pi state, queue)" },
+    { command: "session",    description: "Show session state (model, messages, thinking)" },
+
     { command: "last",      description: "Show last assistant response text" },
     { command: "showthink", description: "Toggle thinking block visibility" },
     { command: "showtools", description: "Toggle live tool call messages" },
@@ -886,6 +921,7 @@ if (import.meta.main) {
     { command: "resume",    description: "Switch to a previous session" },
     { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "name",      description: "Set a display name for the current session" },
+    { command: "quit",      description: "Exit the daemon" },
   ]);
 
 
