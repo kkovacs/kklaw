@@ -13,11 +13,12 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 
 ## Pipeline
 
-1. Telegram text/photo → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`.
-2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
-3. Pi streams `text_delta` → relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
-4. On `agent_end` → final edit (or error placeholder if stream produced no content and Pi errored), tool summary, clear state, process next queued message.
-5. If pi busy → message queued FIFO (in-memory), user gets "Queued." reply.
+1. Telegram text/photo/document → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`. Documents with `image/*` MIME type handled identically via `bot.on("message:document")`.
+2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos/documents). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
+3. Pi's `message_start` (assistant role) → creates a new Telegram placeholder message + per-message `Relay`. `message_update`/`text_delta` → current relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
+4. `message_end` → finalizes current relay. If no content produced (tool-call-only message), the placeholder is deleted. If an error arrived with no content, the placeholder is edited to show the error.
+5. On `agent_end` → safety-net finalization of any remaining relay, error surfacing fallback (guarded by `piErrorSent` flag), tool summary, clear state, process next queued message.
+6. If pi busy → message queued FIFO (in-memory), user gets "Queued." reply.
 
 ### File injection pipeline
 
@@ -44,14 +45,14 @@ Commands use loose coupling: the handler stores a per-command chatId field (`las
 
 - **Gateway class** accepts injectable `TelegramApi` and download/delete functions — testable with mocks.
 - **JSONL framer** is custom: Node's `readline` splits on `U+2028`/`U+2029` which are valid in JSON strings. Custom `\n`-only splitter with `\r` strip.
-- **Debounced streaming**: buffer accumulates deltas, `editMessageText` fires on a timer, final edit on `agent_end`.
+- **Debounced streaming**: buffer accumulates deltas, `editMessageText` fires on a timer, final edit on `message_end`. New `Relay` created per assistant `message_start`; each Pi message maps to one Telegram message.
 - **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end` don't trigger it.
 - **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).
 - **MarkdownV2 escape**: relaxed escape — `*` `_` `` ` `` pass through for Pi's formatting; all other reserved chars (`[`, `(`, `~`, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`, `\`) escaped.
 - **Sequential processing**: Pi handles one prompt at a time. Queue is FIFO, in-memory.
 - **Pi restart on crash**: `exit`/`error` handler spawns a new pi process after 1s delay.
-- **Error bubbling**: Pi errors that produce no stream content surface to the Telegram user by editing the placeholder message.
-- **Verbosity**: `-v` = key events/states + error context, `-vv` = + `sendPi` raw + telegram msg JSON, `-vvv` = + full event JSON + raw stdout lines. Pi errors always logged to stderr regardless.
+- **Error bubbling**: Pi errors that produce no stream content surface to the Telegram user by editing the placeholder message. If no placeholder was created (model rejects before any assistant `message_start`), the error is sent as a new `sendMessage`. `piErrorSent` flag prevents double-surfacing across `message_end` + `agent_end`.
+- **Verbosity**: `-v` = key events/states + error context, `-vv` = + `sendPi` raw + telegram msg summary (`{userId, chatId, text/caption}` — NOT full `ctx.msg`), `-vvv` = + full event JSON + raw stdout lines. Pi errors always logged to stderr regardless. Note: `-vvv` does not log the full Telegram `ctx.msg` object — it only logs selected fields (userId, chatId, text/caption).
 - **drop_pending_updates: true** — avoids stale Telegram messages on restart.
 - **Command registration via `setMyCommands`** — clears stale chat-scoped commands on startup, registers global commands so they appear in `/` autocomplete.
 - **grammy handler ordering**: `bot.command()` handlers must be registered before `bot.on("message:text")` catch-all.
@@ -64,7 +65,7 @@ Commands use loose coupling: the handler stores a per-command chatId field (`las
 - `/resume` shows limited results; no pagination
 - Photo media group debouncing not implemented
 - Photo download has no size limit check
-- Documents with `image/*` MIME types and stickers not handled (only `message:photo`)
+- Stickers not handled (photos and `image/*` documents are)
 
 ## Pi/provider gotcha
 

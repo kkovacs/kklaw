@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gateway } from "../index";
-import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext } from "../telegram";
+import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "../telegram";
 import { loadFixtureLines } from "./helpers";
 import type { PiClient } from "../pi-client";
 
@@ -37,6 +37,23 @@ function mockPhotoContext(overrides: Partial<PhotoMessageContext> = {}): PhotoMe
         { file_id: "small", file_unique_id: "u1", width: 100, height: 100, file_size: 1000 },
         { file_id: "large", file_unique_id: "u2", width: 800, height: 600, file_size: 50000 },
       ],
+    },
+    reply: async () => {},
+    ...overrides,
+  };
+}
+
+function mockDocumentContext(overrides: Partial<DocumentMessageContext> = {}): DocumentMessageContext {
+  return {
+    chatId: 123,
+    from: { id: 8476228873 },
+    msg: {
+      caption: "what's in this doc",
+      document: {
+        file_id: "doc_file_id",
+        mime_type: "image/png",
+        file_name: "photo.png",
+      },
     },
     reply: async () => {},
     ...overrides,
@@ -371,6 +388,30 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(edits.length).toBe(1);
     expect(edits[0]!.text).toBe("❌ Error: provider validation failed");
+    expect(gateway.piStreaming).toBe(false);
+  });
+
+  it("bubbles Pi errors via sendMessage when no placeholder was ever created", async () => {
+    const sent: { chatId: number | string; text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text) => { sent.push({ chatId, text }); return { message_id: 77 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    // model rejects before any assistant message_start — no placeholder created
+    gateway.handlePiEvent({ type: "agent_start" });
+    gateway.handlePiEvent({ type: "turn_start" });
+    await gateway.handlePiEvent({ type: "message_end", message: { stopReason: "error", errorMessage: "provider validation failed" } });
+    gateway.handlePiEvent({ type: "turn_end" });
+    await gateway.handlePiEvent({
+      type: "agent_end",
+      messages: [{ stopReason: "error", errorMessage: "provider validation failed" }],
+    });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.text).toBe("❌ Error: provider validation failed");
     expect(gateway.piStreaming).toBe(false);
   });
 
@@ -1673,5 +1714,143 @@ describe("Gateway.handlePhotoMessage", () => {
       type: "prompt",
       message: "hello",
     }]);
+  });
+});
+
+describe("Gateway.handleDocumentMessage", () => {
+  it("rejects unauthorized user", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 999, api });
+    gateway.downloadFile = async () => Buffer.from("fake");
+    const ctx = mockDocumentContext({ from: { id: 111 } });
+    let replied = false;
+    ctx.reply = async () => { replied = true; };
+
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(gateway.queue.length).toBe(0);
+    expect(gateway.piStreaming).toBe(false);
+    expect(replied).toBe(false);
+  });
+
+  it("ignores non-image documents", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("pdf");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockDocumentContext({
+      msg: { document: { file_id: "f1", mime_type: "application/pdf", file_name: "doc.pdf" } },
+    });
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(gateway.piStreaming).toBe(false);
+    expect(piCommands).toEqual([]);
+  });
+
+  it("ignores document with missing file_id", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockDocumentContext({ msg: { document: undefined } });
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(gateway.piStreaming).toBe(false);
+    expect(piCommands).toEqual([]);
+  });
+
+  it("starts a session with caption and image when pi is idle", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("docdata");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockDocumentContext();
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(gateway.piStreaming).toBe(true);
+    expect(piCommands).toEqual([{
+      type: "prompt",
+      message: "what's in this doc",
+      images: [{
+        type: "image",
+        data: Buffer.from("docdata").toString("base64"),
+        mimeType: "image/png",
+      }],
+    }]);
+  });
+
+  it("uses empty message when document has no caption", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("img");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockDocumentContext({ msg: { caption: undefined, document: mockDocumentContext().msg.document } });
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(piCommands[0]).toHaveProperty("message", "");
+    expect(piCommands[0]).toHaveProperty("images");
+  });
+
+  it("uses the document's actual MIME type", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("webp");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockDocumentContext({
+      msg: { document: { file_id: "f1", mime_type: "image/webp", file_name: "sticker.webp" } },
+    });
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(piCommands[0]).toHaveProperty("images", [{
+      type: "image",
+      data: Buffer.from("webp").toString("base64"),
+      mimeType: "image/webp",
+    }]);
+  });
+
+  it("replies 'Failed to download document.' on download error", async () => {
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => { throw new Error("network down"); };
+
+    const ctx = mockDocumentContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(replies).toEqual(["Failed to download document."]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("queues message with images when pi is busy", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.piStreaming = true;
+    gateway.downloadFile = async () => Buffer.from("busy-doc");
+    const replies: string[] = [];
+    const ctx = mockDocumentContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(gateway.queue.length).toBe(1);
+    expect(gateway.queue[0]!.text).toBe("what's in this doc");
+    expect(gateway.queue[0]!.images).toEqual([{
+      type: "image",
+      data: Buffer.from("busy-doc").toString("base64"),
+      mimeType: "image/png",
+    }]);
+    expect(replies).toEqual(["⏳ Queued."]);
   });
 });

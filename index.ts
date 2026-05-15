@@ -264,16 +264,21 @@ export class Gateway {
       }
       if (this.currentRelay) {
         const hadContent = await this.currentRelay.onDone();
-        if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId && !this.piErrorSent) {
+        if (!hadContent && this.lastPiError && this.currentChatId && !this.piErrorSent) {
           try {
-            await this.api.editMessageText(
-              this.currentChatId,
-              this.currentPlaceholderMessageId,
-              `❌ Error: ${this.lastPiError}`,
-            );
+            if (this.currentPlaceholderMessageId) {
+              await this.api.editMessageText(
+                this.currentChatId,
+                this.currentPlaceholderMessageId,
+                `❌ Error: ${this.lastPiError}`,
+              );
+            } else {
+              const sent = await this.api.sendMessage(this.currentChatId, `❌ Error: ${this.lastPiError}`);
+              this.currentPlaceholderMessageId = sent.message_id;
+            }
             this.piErrorSent = true;
           } catch (err) {
-            console.error(`[telegram] error edit failed: ${err instanceof Error ? err.message : String(err)}`);
+            console.error(`[telegram] error message failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         } else if (!hadContent && this.currentChatId && this.currentPlaceholderMessageId) {
           this.api.deleteMessage?.(this.currentChatId, this.currentPlaceholderMessageId)?.catch((err: Error) => {
@@ -303,16 +308,21 @@ export class Gateway {
       if (hadContent && this.lastPiError) {
         dbg(1, `agent ended with error but content was produced: ${this.lastPiError}`);
       }
-      if (!hadContent && this.lastPiError && this.currentChatId && this.currentPlaceholderMessageId && !this.piErrorSent) {
+      if (!hadContent && this.lastPiError && this.currentChatId && !this.piErrorSent) {
         try {
-          await this.api.editMessageText(
-            this.currentChatId,
-            this.currentPlaceholderMessageId,
-            `❌ Error: ${this.lastPiError}`,
-          );
+          if (this.currentPlaceholderMessageId) {
+            await this.api.editMessageText(
+              this.currentChatId,
+              this.currentPlaceholderMessageId,
+              `❌ Error: ${this.lastPiError}`,
+            );
+          } else {
+            const sent = await this.api.sendMessage(this.currentChatId, `❌ Error: ${this.lastPiError}`);
+            this.currentPlaceholderMessageId = sent.message_id;
+          }
           this.piErrorSent = true;
         } catch (err) {
-          console.error(`[telegram] error edit failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.error(`[telegram] error message failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
