@@ -212,9 +212,7 @@ export class Gateway {
     if (type === "message_update") {
       const delta = (event as PiEvent).assistantMessageEvent;
       if (delta?.type === "text_delta" && delta.delta) {
-        this.currentRelay?.onDelta(delta.delta, 'text');
-      } else if (delta?.type === "thinking_delta" && delta.delta) {
-        this.currentRelay?.onDelta(delta.delta, 'thinking');
+        this.currentRelay?.onDelta(delta.delta);
       } else if (delta?.type === "error") {
         const reason = delta.reason ?? "unknown";
         console.error(`[pi] stream error: ${reason}`);

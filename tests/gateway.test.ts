@@ -231,32 +231,6 @@ describe("Gateway.handlePiEvent", () => {
     expect(edits).toEqual(["hi"]);
   });
 
-  it("streams thinking_delta through relay with blockquote prefix", async () => {
-    const edits: { text: string; parse_mode?: unknown }[] = [];
-    const gateway = new Gateway({
-      allowedUserId: 1,
-      api: {
-        sendMessage: async () => ({ message_id: 1 }),
-        editMessageText: async (_c, _m, text, other) => {
-          edits.push({ text, parse_mode: other?.parse_mode });
-        },
-      },
-    });
-
-    await gateway.startPiSession(123, "test");
-
-    gateway.handlePiEvent({
-      type: "message_update",
-      assistantMessageEvent: { type: "thinking_delta", delta: "hmm..." },
-    });
-
-    await gateway.currentRelay!.onDone();
-
-    expect(edits.length).toBe(1);
-    expect(edits[0]!.text).toBe("> hmm\\.\\.\\.\n");
-    expect(edits[0]!.parse_mode).toBe("MarkdownV2");
-  });
-
   it("clears state on agent_end and processes queue", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
@@ -614,22 +588,16 @@ describe("Integration: replay recorded fixture", () => {
     expect(edits.length).toBeGreaterThan(0);
 
     const expected =
-      `> The user has greeted me with "Hello robot\\!" \\- a friendly greeting\\. I should respond in a friendly, helpful manner and let them know I'm ready to help with their kklaw project \\(the Telegram ↔ Pi RPC Gateway project in the current directory\\)\\.\n` +
-      `>\n` +
-      `> I should be concise and friendly, and offer to help with whatever they need related to their project\\.\n` +
-      `>\n` +
-      `\n` +
-      `\n` +
-      `Hello\\! I'm here to help with your kklaw project \\- the Telegram ↔ Pi RPC Gateway\\.\n` +
-      `\n` +
-      `What would you like to work on? I can help with:\n` +
-      `\\- Reading or editing code files\n` +
-      `\\- Running commands\n` +
-      `\\- Understanding the codebase\n` +
-      `\\- Fixing bugs or adding features\n` +
-      `\\- Running tests\n` +
-      `\n` +
-      `Just let me know what you need\\!`;
+      "\n\nHello\\! I'm here to help with your kklaw project \\- the Telegram ↔ Pi RPC Gateway\\.\n" +
+      "\n" +
+      "What would you like to work on? I can help with:\n" +
+      "\\- Reading or editing code files\n" +
+      "\\- Running commands\n" +
+      "\\- Understanding the codebase\n" +
+      "\\- Fixing bugs or adding features\n" +
+      "\\- Running tests\n" +
+      "\n" +
+      "Just let me know what you need\\!";
     expect(edits[edits.length - 1]).toBe(expected);
   });
 });

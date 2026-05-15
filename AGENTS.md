@@ -15,7 +15,7 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 
 1. Telegram text/photo → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`.
 2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
-3. Pi streams `text_delta` + `thinking_delta` → relay accumulates, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced.
+3. Pi streams `text_delta` → relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
 4. On `agent_end` → final edit (or error placeholder if stream produced no content and Pi errored), tool summary, clear state, process next queued message.
 5. If pi busy → message queued FIFO (in-memory), user gets "Queued." reply.
 
@@ -46,9 +46,8 @@ Commands use loose coupling: the handler stores a per-command chatId field (`las
 - **JSONL framer** is custom: Node's `readline` splits on `U+2028`/`U+2029` which are valid in JSON strings. Custom `\n`-only splitter with `\r` strip.
 - **Debounced streaming**: buffer accumulates deltas, `editMessageText` fires on a timer, final edit on `agent_end`.
 - **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end` don't trigger it.
-- **Thinking via blockquote**: `thinking_delta` events interleaved with `text_delta`. Relay wraps thinking in `> ` prefix (MarkdownV2 blockquote).
-- **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback). Blockquote continuation on split.
-- **Dual MarkdownV2 escape**: thinking gets strict escape (all reserved chars); text gets relaxed escape (`*` `_` `` ` `` pass through for Pi's formatting). Other reserved chars always escaped.
+- **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).
+- **MarkdownV2 escape**: relaxed escape — `*` `_` `` ` `` pass through for Pi's formatting; all other reserved chars (`[`, `(`, `~`, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`, `\`) escaped.
 - **Sequential processing**: Pi handles one prompt at a time. Queue is FIFO, in-memory.
 - **Pi restart on crash**: `exit`/`error` handler spawns a new pi process after 1s delay.
 - **Error bubbling**: Pi errors that produce no stream content surface to the Telegram user by editing the placeholder message.

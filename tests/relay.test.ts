@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "bun:test";
-import { createRelay } from "../relay";
+import { createRelay, escapeText } from "../relay";
 
 describe("createRelay", () => {
   beforeEach(() => { vi.useFakeTimers(); });
@@ -75,65 +75,6 @@ describe("createRelay", () => {
     expect(logs[1]).toContain("final edit");
   });
 
-  it("wraps thinking deltas with > blockquote prefix", async () => {
-    const edits: string[] = [];
-    const relay = createRelay({
-      edit: async (text) => edits.push(text),
-      debounceMs: 30,
-    });
-
-    relay.onDelta("I think this is correct.", 'thinking');
-    await relay.onDone();
-
-    expect(edits.length).toBe(1);
-    expect(edits[0]).toBe("> I think this is correct\\.\n");
-  });
-
-  it("escapes MarkdownV2 special chars in thinking content", async () => {
-    const edits: string[] = [];
-    const relay = createRelay({
-      edit: async (text) => edits.push(text),
-      debounceMs: 9999,
-    });
-
-    relay.onDelta("use *bold* and _italic_", 'thinking');
-    await relay.onDone();
-
-    expect(edits[0]).toBe("> use \\*bold\\* and \\_italic\\_\n");
-  });
-
-  it("interleaves text and thinking with correct formatting", async () => {
-    const edits: string[] = [];
-    const relay = createRelay({
-      edit: async (text) => edits.push(text),
-      debounceMs: 9999,
-    });
-
-    relay.onDelta("Hello. ");
-    relay.onDelta("Let me think...", 'thinking');
-    relay.onDelta(" Here is the answer.");
-    await relay.onDone();
-
-    // Text, then thinking blockquoted with `> ` prefix, then text (all escaped)
-    expect(edits[0]).toBe("Hello\\. \n> Let me think\\.\\.\\.\n Here is the answer\\.");
-  });
-
-  it("multiple thinking blocks each get blockquote prefix", async () => {
-    const edits: string[] = [];
-    const relay = createRelay({
-      edit: async (text) => edits.push(text),
-      debounceMs: 9999,
-    });
-
-    relay.onDelta("Part 1. ");
-    relay.onDelta("thinking 1", 'thinking');
-    relay.onDelta("Part 2. ");
-    relay.onDelta("thinking 2", 'thinking');
-    await relay.onDone();
-
-    expect(edits[0]).toBe("Part 1\\. \n> thinking 1\nPart 2\\. \n> thinking 2\n");
-  });
-
   it("lets * _ ` through in text segments so Pi's markdown renders", async () => {
     const edits: string[] = [];
     const relay = createRelay({
@@ -147,5 +88,28 @@ describe("createRelay", () => {
     // `*`, `_`, `` ` `` pass through unescaped — Telegram renders them as formatting
     expect(edits[0]).toBe("Use **bold** and *italic* and `code`");
   });
+});
 
+describe("escapeText", () => {
+  it("escapes [, ], (, ), ~, >, #, +, -, =, |, {, }, ., !, \\", () => {
+    expect(escapeText("[test]")).toBe("\\[test\\]");
+    expect(escapeText("(parens)")).toBe("\\(parens\\)");
+    expect(escapeText("~strikethrough~")).toBe("\\~strikethrough\\~");
+    expect(escapeText("> quote")).toBe("\\> quote");
+    expect(escapeText("# heading")).toBe("\\# heading");
+    expect(escapeText("1+1=2")).toBe("1\\+1\\=2");
+    expect(escapeText("foo-bar")).toBe("foo\\-bar");
+    expect(escapeText("|pipe|")).toBe("\\|pipe\\|");
+    expect(escapeText("{brace}")).toBe("\\{brace\\}");
+    expect(escapeText(".")).toBe("\\.");
+    expect(escapeText("!")).toBe("\\!");
+    expect(escapeText("\\backslash")).toBe("\\\\backslash");
+  });
+
+  it("lets * _ ` through for Pi's markdown formatting", () => {
+    expect(escapeText("**bold**")).toBe("**bold**");
+    expect(escapeText("*italic*")).toBe("*italic*");
+    expect(escapeText("_alsoitalic_")).toBe("_alsoitalic_");
+    expect(escapeText("`code`")).toBe("`code`");
+  });
 });
