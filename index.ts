@@ -6,6 +6,7 @@ import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
 import { createSafeEditor, formatToolCall, type TelegramApi, type MessageContext } from "./telegram";
+import { InjectWatcher } from "./inject";
 
 // ============================================================
 // Config (loaded from .env by Bun auto)
@@ -14,6 +15,7 @@ import { createSafeEditor, formatToolCall, type TelegramApi, type MessageContext
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 const SESSION_DIR = (process.env.PI_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions")).replace(/^~/, homedir());
+const INJECT_DIR = (process.env.TELEGRAM_INJECT_DIR ?? join(homedir(), ".pi", "agent", "injects")).replace(/^~/, homedir());
 
 // Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
@@ -544,6 +546,19 @@ export class Gateway {
     );
   }
 
+  injectPrompt(text: string, filename: string): void {
+    const chatId = this.currentChatId || this.allowedUserId;
+    dbg(1, `injectPrompt file=${filename} chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+
+    if (this.piStreaming) {
+      dbg(1, `pi busy, queuing injected prompt (queue.length=${this.queue.length})`);
+      this.queue.push({ chatId, text });
+      return;
+    }
+
+    this.startPiSession(chatId, text);
+  }
+
   async handleTextMessage(
     ctx: MessageContext,
     api: TelegramApi = this.api,
@@ -862,6 +877,11 @@ if (import.meta.main) {
 
 
   spawnPi();
+
+  const watcher = new InjectWatcher(INJECT_DIR, (text, filename) => gateway.injectPrompt(text, filename));
+  watcher.start();
+  dbg(1, `inject watcher started dir=${INJECT_DIR}`);
+
   bot.start({
     drop_pending_updates: true,
     onStart: () => console.log("kklaw gateway started"),

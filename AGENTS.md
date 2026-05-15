@@ -9,7 +9,7 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.ts` (session file scanning), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL). Extracted for testability.
+Five files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.ts` (session file scanning), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL), `inject.ts` (file-based prompt injection). Extracted for testability.
 
 ### Pipeline
 
@@ -19,6 +19,10 @@ Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
 5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
+
+### File injection pipeline
+
+External cron/tool writes a file → `InjectWatcher.scan()` detects it → reads + deletes → `Gateway.injectPrompt(text, filename)` → same session pipeline as step 3 above. Responses stream to `currentChatId` (or fall back to `allowedUserId`).
 
 #### Slash commands (Telegram → Pi RPC)
 
@@ -118,6 +122,7 @@ Bun auto-loads `.env` — no library needed.
 | `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
 | `PI_SESSION_DIR` | root dir to scan for session `.jsonl` files | `~/.pi/agent/sessions/` |
+| `TELEGRAM_INJECT_DIR` | directory watched for prompt files (polled every 12s) | `~/.pi/agent/injects/` |
 
 Extra Pi flags (provider, model, no-session, etc.) are passed on the command line after `--`:
 
@@ -217,12 +222,35 @@ Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSe
 - Name stored as: `{"type":"session_info",...,"name":"My Session"}` — appended anywhere in file, latest one wins
 - `set_session_name` RPC rejects empty strings; clearing a name requires extension-level access (not yet wired)
 
+### `inject.ts`
+
+File-based prompt injection. Watches a directory for prompt files created by external tools (Unix cron, `at`, etc.). When a file appears, reads its content, deletes the file, then injects the prompt into the current Pi session — same pipeline as a Telegram message.
+
+**`InjectWatcher` class** — `new InjectWatcher(dir, onPrompt)`
+- `start()` — ensures directory exists (`mkdir -p`), performs initial scan (processes straggler files from before startup), then polls via `setInterval`.
+- `stop()` — clears the interval.
+- `scan()` — reads all files in `dir`. For each: read content, delete file, then call `onPrompt(text, filename)`. Empty files are deleted silently. Read/unlink failures are logged and the file is left for the next scan cycle.
+- No internal tracking (`seen` set was removed) — file deletion IS the deduplication mechanism. A cron job that writes to the same filename each time works because each new file is a fresh inode.
+
+**Usage:** external tool writes a text file to the inject directory:
+```bash
+echo "review open PRs" > ~/.pi/agent/injects/review
+# or atomic pattern:
+echo "review open PRs" > /tmp/inj && mv /tmp/inj ~/.pi/agent/injects/review
+```
+
+**`Gateway.injectPrompt(text, filename)`** — routes the injected prompt into the session pipeline:
+- If `currentChatId` is set (session active) → uses that chat for the response.
+- Otherwise falls back to `allowedUserId` (works for private chats where userId == chatId).
+- If Pi is busy → queued (same as a user message). If idle → starts a new session.
+
 ### `tests/`
 
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
 | `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `showModels` (full list, filtered buttons, no-match, empty, modality emoji mapping, missing fields), `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`/`get_available_models`; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
+| `inject.test.ts` | Two-file processing, empty-file skip + delete, missing-directory creation, unreadable-file survival |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
