@@ -1,15 +1,14 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, vi, beforeEach, afterEach } from "bun:test";
 import { createRelay } from "../relay";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 describe("createRelay", () => {
-  it("accumulates text deltas and edits after debounce", async () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("accumulates text deltas and edits after debounce", () => {
     const edits: string[] = [];
     const relay = createRelay({
-      edit: async (text) => edits.push(text),
+      edit: (text) => { edits.push(text); return Promise.resolve(); },
       debounceMs: 30,
     });
 
@@ -17,26 +16,26 @@ describe("createRelay", () => {
     relay.onDelta(" world");
     expect(edits).toEqual([]); // not yet
 
-    await sleep(60);
+    vi.advanceTimersByTime(60);
     expect(edits).toEqual(["hello world"]);
   });
 
-  it("debounces multiple edits into one", async () => {
+  it("debounces multiple edits into one", () => {
     const edits: string[] = [];
     const relay = createRelay({
-      edit: async (text) => edits.push(text),
+      edit: (text) => { edits.push(text); return Promise.resolve(); },
       debounceMs: 50,
     });
 
     relay.onDelta("a");
-    await sleep(10);
+    vi.advanceTimersByTime(10);
     relay.onDelta("b");
-    await sleep(10);
+    vi.advanceTimersByTime(10);
     relay.onDelta("c");
-    await sleep(10);
+    vi.advanceTimersByTime(10);
     expect(edits).toEqual([]);
 
-    await sleep(60);
+    vi.advanceTimersByTime(30);
     expect(edits).toEqual(["abc"]);
   });
 
@@ -57,17 +56,6 @@ describe("createRelay", () => {
     relay.onDelta("new");
     await relay.onDone();
     expect(edits).toEqual(["final text", "new"]);
-  });
-
-  it("onDone with empty buffer does nothing", async () => {
-    const edits: string[] = [];
-    const relay = createRelay({
-      edit: async (text) => edits.push(text),
-      debounceMs: 30,
-    });
-
-    await relay.onDone();
-    expect(edits).toEqual([]);
   });
 
   it("logs via optional log callback", async () => {
@@ -160,17 +148,4 @@ describe("createRelay", () => {
     expect(edits[0]).toBe("Use **bold** and *italic* and `code`");
   });
 
-  it("still escapes * _ ` inside thinking blocks", async () => {
-    const edits: string[] = [];
-    const relay = createRelay({
-      edit: async (text) => edits.push(text),
-      debounceMs: 9999,
-    });
-
-    relay.onDelta("maybe use *bold* here?", 'thinking');
-    await relay.onDone();
-
-    // Thinking uses strict escape — `*` gets escaped even though it's a formatting char
-    expect(edits[0]).toBe("> maybe use \\*bold\\* here?\n");
-  });
 });

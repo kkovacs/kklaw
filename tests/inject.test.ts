@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InjectWatcher } from "../inject";
@@ -52,7 +52,8 @@ describe("InjectWatcher", () => {
   });
 
   it("creates directory if missing", async () => {
-    const dir = join(mkdtempSync(join(tmpdir(), "inject-test-")), "nested", "missing");
+    const rootDir = mkdtempSync(join(tmpdir(), "inject-test-"));
+    const dir = join(rootDir, "nested", "missing");
     try {
       const watcher = new InjectWatcher(dir, () => {}, 100);
       await watcher.start();
@@ -61,17 +62,15 @@ describe("InjectWatcher", () => {
       const entries = readdirSync(dir);
       expect(entries).toEqual([]);
     } finally {
-      // Clean from the temp root up
-      const root = dir.split("/").slice(0, -2).join("/") || dir;
-      rmSync(root, { recursive: true, force: true });
+      rmSync(rootDir, { recursive: true, force: true });
     }
   });
 
-  it("survives unreadable file (no crash)", async () => {
+  it("survives unreadable files (subdirectory mixed in)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "inject-test-"));
     try {
       writeFileSync(join(dir, "good.txt"), "ok");
-      // Create a directory entry so readFile fails (isDirectory)
+      mkdirSync(join(dir, "subdir")); // readFileSync will fail on this — must not crash scan
       const calls: { text: string; filename: string }[] = [];
       const watcher = new InjectWatcher(dir, (text, filename) => calls.push({ text, filename }), 100);
 
@@ -80,6 +79,9 @@ describe("InjectWatcher", () => {
 
       expect(calls.length).toBe(1);
       expect(calls[0].filename).toBe("good.txt");
+
+      const remaining = readdirSync(dir);
+      expect(remaining).toEqual(["subdir"]); // good.txt got unlinked, subdir stays
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

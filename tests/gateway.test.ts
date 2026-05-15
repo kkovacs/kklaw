@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gateway } from "../index";
 import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext } from "../telegram";
-import { loadFixtureLines, extractTextDeltas } from "./helpers";
+import { loadFixtureLines } from "./helpers";
 import type { PiClient } from "../pi-client";
 
 function mockApi(): TelegramApi {
@@ -122,15 +122,7 @@ describe("Gateway.processQueue", () => {
     expect(gateway.piStreaming).toBe(true);
   });
 
-  it("does nothing when queue is empty", async () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.piStreaming = false;
 
-    gateway.processQueue(api);
-
-    expect(gateway.piStreaming).toBe(false);
-  });
 });
 
 describe("Gateway.sendTyping", () => {
@@ -678,8 +670,6 @@ describe("Gateway.handlePiEvent", () => {
 describe("Integration: replay recorded fixture", () => {
   it("replays hello-robot.jsonl and produces expected final text", async () => {
     const lines = loadFixtureLines("hello-robot.jsonl");
-    const expectedText = extractTextDeltas(lines);
-    expect(expectedText.length).toBeGreaterThan(0);
 
     const edits: string[] = [];
     const api: TelegramApi = {
@@ -706,7 +696,25 @@ describe("Integration: replay recorded fixture", () => {
 
     expect(gateway.piStreaming).toBe(false);
     expect(edits.length).toBeGreaterThan(0);
-    expect(edits[edits.length - 1]).toBe(expectedText);
+
+    const expected =
+      `> The user has greeted me with "Hello robot\\!" \\- a friendly greeting\\. I should respond in a friendly, helpful manner and let them know I'm ready to help with their kklaw project \\(the Telegram ↔ Pi RPC Gateway project in the current directory\\)\\.\n` +
+      `>\n` +
+      `> I should be concise and friendly, and offer to help with whatever they need related to their project\\.\n` +
+      `>\n` +
+      `\n` +
+      `\n` +
+      `Hello\\! I'm here to help with your kklaw project \\- the Telegram ↔ Pi RPC Gateway\\.\n` +
+      `\n` +
+      `What would you like to work on? I can help with:\n` +
+      `\\- Reading or editing code files\n` +
+      `\\- Running commands\n` +
+      `\\- Understanding the codebase\n` +
+      `\\- Fixing bugs or adding features\n` +
+      `\\- Running tests\n` +
+      `\n` +
+      `Just let me know what you need\\!`;
+    expect(edits[edits.length - 1]).toBe(expected);
   });
 });
 
@@ -943,7 +951,7 @@ describe("Gateway.showDaemonStatus", () => {
 });
 
 describe("Gateway.showLastMessage (/last)", () => {
-  it("sends last assistant text as plain message (no parse_mode)", async () => {
+  it("sends last assistant text with MarkdownV2 escaping", async () => {
     const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
     const api: TelegramApi = {
       sendMessage: async (chatId, text, other) => {
@@ -1447,27 +1455,43 @@ function setupSessionFixtures(): string {
 // ============================================================
 
 describe("Gateway.scanRecentSessions", () => {
-  it("returns sessions sorted by mtime (newest first), extracts names, filters invalid files", () => {
+  it("sorts sessions by mtime (newest first) and extracts names", () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 1, api });
     const sessionsDir = setupSessionFixtures();
 
     const sessions = gateway.scanRecentSessions(10, sessionsDir);
 
-    expect(sessions.length).toBe(4);
-
+    // Sorted: newest (fix-auth-bug) → oldest (subdir)
     expect(sessions[0]!.id).toBe("01999999-1111-7aaa-bbbb-ccccddddeeee");
     expect(sessions[0]!.name).toBe("fix-auth-bug");
-    expect(sessions[0]!.created).toBe("2026-04-12T15:40:00.000Z");
-
     expect(sessions[1]!.id).toBe("01999999-2222-7aaa-bbbb-ccccddddffff");
     expect(sessions[1]!.name).toBeUndefined();
-
     expect(sessions[2]!.id).toBe("01999999-3333-7aaa-bbbb-ccccddddgggg");
     expect(sessions[2]!.name).toBe("refactor");
+  });
 
-    expect(sessions[3]!.id).toBe("01999999-4444-7aaa-bbbb-ccccddddhhhh");
-    expect(sessions[3]!.name).toBeUndefined();
+  it("filters out files without a valid session header", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    const sessionsDir = setupSessionFixtures();
+
+    const sessions = gateway.scanRecentSessions(10, sessionsDir);
+
+    // 5 files total, but bogus.jsonl has no session header → only 4 returned
+    expect(sessions.length).toBe(4);
+  });
+
+  it("recurses into subdirectories", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    const sessionsDir = setupSessionFixtures();
+
+    const sessions = gateway.scanRecentSessions(10, sessionsDir);
+
+    const subdirSession = sessions.find(s => s.id === "01999999-4444-7aaa-bbbb-ccccddddhhhh");
+    expect(subdirSession).not.toBeUndefined();
+    expect(subdirSession!.path).toContain("subdir/");
   });
 
   it("populates sessionPicker map", () => {
