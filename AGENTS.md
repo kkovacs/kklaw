@@ -15,7 +15,7 @@ Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.
 
 1. Telegram user sends a text message or slash command
 2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`
-3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi
+3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi. While pi is working, a "typing..." indicator is sent to Telegram reactively (on each incoming Pi event, with 4s cooldown to avoid rate limits). Stops naturally when events stop arriving (~5s Telegram expiry).
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
 5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
@@ -31,9 +31,11 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 | `/context` | `get_session_stats` | `showStats()` → formats token counts (K/M) + cost into `<pre>` HTML block |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text with MarkdownV2 escaping (via `formatForTelegram()`); raw mode sends plain |
 | `/showthink` | (none) | toggles `showThinking` via inline keyboard (Yes/No) |
-| `/raw` | (none) | toggles `rawMode` via inline keyboard (Raw / MarkdownV2); controls escaping + `parse_mode` for streaming and `/last` |
+| `/showtools` | (none) | toggles `showTools` via inline keyboard (On/Off); when On, sends a `<pre>` HTML message per tool call with truncated `JSON.stringify(args)` |
+| `/showraw` | (none) | toggles `rawMode` via inline keyboard (Raw / MarkdownV2); controls escaping + `parse_mode` for streaming and `/last` |
 | `/resume` | (none; filesystem scan) | scans `~/.pi/agent/sessions/` for recent `.jsonl` session files, shows inline keyboard |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
+| `/delete` | `get_state` → `unlink` → `new_session` | async: sends `get_state`, finds session file in `sessionPicker` by `sessionId`, deletes the `.jsonl` file via `fs.unlink`, calls `resetSession()` + `new_session`, replies "Session deleted. New session started." Falls back gracefully if session not found or file is missing.
 
 ### Key design decisions
 
@@ -41,6 +43,7 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 - **Testable core**: `Gateway` class accepts `TelegramApi` and `PiClient` as injectable deps. Tests use mock APIs, no real Telegram or pi needed.
 - **JSONL framer is custom**: Node's `readline` is incompatible (splits on `U+2028`/`U+2029` which are valid in JSON strings). Custom `\n`-only splitter with optional `\r` strip.
 - **Debounced streaming**: editing Telegram messages per-character would hit rate limits. Buffer accumulates deltas, `editMessageText` fires every 600ms, final edit on `agent_end`.
+- **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming Pi event that means work is happening (`text_delta`, `thinking_delta`, `tool_execution_start`, etc.), with a 4s cooldown. No `setInterval` — the indicator is driven by real events and naturally expires ~5s after Pi goes silent. Events like `response` and `agent_end` do not trigger it.
 - **Thinking via blockquote**: `thinking_delta` events are streamed alongside `text_delta`. The relay interleaves segments, wrapping thinking content in `> ` prefix (MarkdownV2 blockquote) with special characters escaped.
 - **Robust Telegram editing (`createSafeEditor`)**: sits between `relay.ts` and the Telegram API. Handles three error classes:
   - `MESSAGE_TOO_LONG` (4000 char limit) → rolls back to the last known good text, then `sendMessage`s the remainder in ≤4000-char chunks. Earlier chunks are "frozen"; streaming continues on the newest chunk.
@@ -110,15 +113,18 @@ bun test           # run tests
 - `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, ignores `/` commands, enqueues or starts a pi session.
 - `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt",...}` to pi.
 - `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
-  - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()` when `lastChatId` is set
+  - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()` when `lastChatId` is set. Also handles `/delete` flow when `deleteRequestChatId` is set: extracts `sessionId` from `get_state` response, looks up `SessionInfo.path` in `sessionPicker` (rescans only if not found), deletes the `.jsonl` file, then `resetSession()` + `new_session` + confirmation message.
   - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
   - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
   - `message_update` with `error` → logs to stderr immediately (always, even without `-v`)
   - `message_end` with `stopReason === "error"` → captures `errorMessage` for later
-  - `tool_execution_start` → counts tool calls by `toolName` in `turnToolCounts` map (accumulated across all turns).
+  - `tool_execution_start` → counts tool calls by `toolName` in `turnToolCounts` map (accumulated across all turns). If `showTools` is enabled, also formats and sends a `<pre>` HTML message with `JSON.stringify(args)` (truncated to 250 chars).
   - `agent_end` → `await relay.onDone()`. Sends tool summary message (`"🔧 N tools used: bash ×3, read"`) if any tools were counted. If relay produced no content and an error was captured, edits the placeholder message with the error text. Then `processQueue()`.
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
+- `sendTyping(chatId)` — fires `sendChatAction("typing")` with 4s cooldown. Called reactively by `handlePiEvent` on events that mean Pi is working (not `response` or `agent_end`).
+- `formatToolCall(args, toolName)` — exported pure function. Returns `<pre>🔧 name: {"key":"val"}</pre>` with HTML-escaped, 250-c truncated `JSON.stringify(args)`. Handles missing/falsy args gracefully.
+- `htmlEscape(s)` — escapes `&`, `<`, `>` for HTML `parse_mode` messages.
 - `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command and session switching.
 - `formatForTelegram(rawText)` — centralizes MarkdownV2 escaping + `parse_mode` for one-shot messages. Returns `{ text, other? }`. In raw mode: plain text, no `parse_mode`. In MarkdownV2 mode: `escapeText()` escaped text + `{ parse_mode: "MarkdownV2" }`. Used by `showLastMessage`; apply to any future one-shot text site.
 - `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking).
@@ -127,8 +133,12 @@ bun test           # run tests
 - `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
 - `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
 - `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
+- `lastTypingSent: number` — timestamp of last `sendChatAction` for cooldown.
 - `turnToolCounts: Map<toolName, count>` — accumulates tool calls via `tool_execution_start` events during an agent run. Cleared at `agent_end` (after sending summary) and `resetSession()`.
-- `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()` and `resume:` callback.
+- `showTools: boolean` — toggled by `/showtools` command; when true, each `tool_execution_start` sends a live `<pre>` HTML message with truncated args.
+- `deleteRequestChatId: number | string` — set by `/delete` command; triggers session deletion + reset in the `get_state` response handler. Cleared after handling.
+- `deleteFile: (path: string) => Promise<void>` — injected file deletion function (defaults to `fs.promises.unlink`). Testable via mock.
+- `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()`, `/delete` handler, and `resume:` callback.
 - `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
 - `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
 
@@ -175,7 +185,7 @@ Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSe
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showLastMessage`, `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`, fixture replay for status/context/last; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
 
@@ -202,6 +212,21 @@ Telegram command (e.g. /resume)
       → callback_data: "resume:<uuid>" (fits in 64-byte limit)
     → ctx.reply("Resume a session:", { reply_markup: kb })
 
+Telegram command (e.g. /delete)
+  → bot.command("delete", handler)
+    → gateway.deleteRequestChatId = ctx.chatId
+    → sendPi({ type: "get_state" })
+    → ctx.reply("Deleting session...")
+  ... (loose coupling: response arrives later)
+  → Gateway.handlePiEvent()
+    → [response, command="get_state", deleteRequestChatId !== 0]
+      → extract sessionId from resp.data
+      → lookup in sessionPicker (rescan only if missing)
+      → if found: unlink(sessionInfo.path)
+      → resetSession() + sendPi({ type: "new_session" })
+      → api.sendMessage(chatId, "Session deleted. New session started.")
+      → clear deleteRequestChatId
+
 Telegram callback (e.g. resume button clicked)
   → bot.callbackQuery(/^resume:(.+)$/, handler)  ← regex captures uuid
     → gateway.switchToSession(sessionId)
@@ -218,11 +243,11 @@ Telegram command (e.g. /name)
     → sendPi({ type: "set_session_name", name })
     → ctx.reply("Named.")
 
-Telegram command (e.g. /raw)
-  → bot.command("raw", handler)
+Telegram command (e.g. /showraw)
+  → bot.command("showraw", handler)
     → shows inline keyboard: Raw / MarkdownV2 with current state checked
-  → bot.callbackQuery("raw:on") → gateway.rawMode = true (next session: no escaping, plain text)
-  → bot.callbackQuery("raw:off") → gateway.rawMode = false (default: full MarkdownV2 escaping)
+  → bot.callbackQuery("showraw:on") → gateway.rawMode = true (next session: no escaping, plain text)
+  → bot.callbackQuery("showraw:off") → gateway.rawMode = false (default: full MarkdownV2 escaping)
 
 Telegram command (e.g. /status)
   → bot.command("status", handler)
@@ -238,6 +263,7 @@ pi stdout
   → createPiClient attachJsonlReader
     → JSON.parse(line)
     → Gateway.handlePiEvent()
+      → [any event except response, agent_end] → sendTyping(chatId) (4s cooldown)
       → [response] → log success/error; route get_state/get_session_stats
       → [text_delta] → relay.onDelta(delta, 'text')
       → [thinking_delta] → relay.onDelta(delta, 'thinking')
@@ -246,6 +272,7 @@ pi stdout
           → [too long] → rollback + api.sendMessage(chunks, { parse_mode: "MarkdownV2" })
           → [parse error, streaming] → skip, retry later
       → [tool_execution_start] → gateway.turnToolCounts.set(name, (count ?? 0) + 1)
+        → [if showTools && currentChatId] → api.sendMessage(formatToolCall(args, name), { parse_mode: "HTML" })
       → [agent_end] → await relay.onDone() → boolean hadContent
         → [hadContent=true] → createSafeEditor.edit(final, isFinal=true)
           → [OK] → api.editMessageText(lastMsg, final, { parse_mode: "MarkdownV2" })

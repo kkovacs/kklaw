@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Gateway, type TelegramApi, type MessageContext } from "../index";
+import { Gateway, formatToolCall, type TelegramApi, type MessageContext } from "../index";
 import { loadFixtureLines, extractTextDeltas } from "./helpers";
 import type { PiClient } from "../pi-client";
 
@@ -10,6 +10,7 @@ function mockApi(): TelegramApi {
   return {
     sendMessage: async () => ({ message_id: 42 }),
     editMessageText: async () => ({}),
+    sendChatAction: async () => ({}),
   };
 }
 
@@ -111,6 +112,84 @@ describe("Gateway.processQueue", () => {
     gateway.processQueue(api);
 
     expect(gateway.piStreaming).toBe(false);
+  });
+});
+
+describe("Gateway.sendTyping", () => {
+  it("sends sendChatAction with 'typing'", () => {
+    const actions: [number | string, string][] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendChatAction: async (chatId, action) => { actions.push([chatId, action]); },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sendTyping(123);
+
+    expect(actions).toEqual([[123, "typing"]]);
+  });
+
+  it("respects 4s cooldown on back-to-back calls", () => {
+    let count = 0;
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendChatAction: async () => { count++; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sendTyping(123);
+    gateway.sendTyping(123);
+    gateway.sendTyping(123);
+
+    expect(count).toBe(1);
+  });
+
+  it("sends again after cooldown expires", () => {
+    const actions: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendChatAction: async (_c, a) => { actions.push(a); },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sendTyping(123);
+    expect(actions).toEqual(["typing"]);
+
+    gateway.lastTypingSent = Date.now() - 5000;
+    gateway.sendTyping(123);
+    expect(actions).toEqual(["typing", "typing"]);
+  });
+});
+
+describe("formatToolCall", () => {
+  it("formats tool name and args as <pre> HTML", () => {
+    const result = formatToolCall({ command: "ls -la" }, "bash");
+    expect(result).toBe('<pre>\uD83D\uDD27 bash: {"command":"ls -la"}</pre>');
+  });
+
+  it("formats tool without args", () => {
+    const result = formatToolCall(undefined, "unknown_tool");
+    expect(result).toBe('<pre>\uD83D\uDD27 unknown_tool</pre>');
+  });
+
+  it("formats tool with null args", () => {
+    const result = formatToolCall(null, "bash");
+    expect(result).toBe('<pre>\uD83D\uDD27 bash</pre>');
+  });
+
+  it("truncates long args at 250 chars with ...", () => {
+    const longCmd = "x".repeat(300);
+    const result = formatToolCall({ command: longCmd }, "bash");
+    expect(result.length).toBeLessThanOrEqual(300); // <pre>🔧 bash:  + 250-chars json + </pre>
+    expect(result).toContain("...");
+    expect(result).toEndWith('</pre>');
+  });
+
+  it("HTML-escapes <, >, & in tool name", () => {
+    const result = formatToolCall({}, "<bash> & stuff");
+    expect(result).toContain("&lt;bash&gt; &amp; stuff");
+  });
+
+  it("HTML-escapes <, >, & in args JSON", () => {
+    const result = formatToolCall({ path: "src/<foo> & bar.txt" }, "read");
+    expect(result).toContain("src/&lt;foo&gt; &amp; bar.txt");
   });
 });
 
@@ -342,7 +421,243 @@ describe("Gateway.handlePiEvent", () => {
     expect(edits[0]!.text).toBe("Error: provider validation failed");
     expect(gateway.piStreaming).toBe(false);
   });
+
+  it("triggers sendTyping on events that mean Pi is working", async () => {
+    const typingCalls: number[] = [];
+    const api: TelegramApi = {
+      sendMessage: async () => ({ message_id: 1 }),
+      editMessageText: async () => ({}),
+      sendChatAction: async (chatId) => { typingCalls.push(chatId as number); },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    gateway.handlePiEvent({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "a" } });
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    gateway.handlePiEvent({ type: "message_end" });
+    gateway.handlePiEvent({ type: "message_start" });
+    gateway.handlePiEvent({ type: "turn_start" });
+
+    expect(typingCalls.length).toBe(1); // cooldown skips subsequent events
+    expect(typingCalls[0]).toBe(123);
+  });
+
+  it("does NOT send typing on response event", async () => {
+    const actions: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendChatAction: async (_c, a) => { actions.push(a); },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.currentChatId = 123;
+
+    gateway.handlePiEvent({ type: "response", command: "get_state", success: true, data: {} });
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does NOT send typing on agent_end event", async () => {
+    const actions: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendChatAction: async (_c, a) => { actions.push(a); },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.currentChatId = 123;
+
+    await gateway.handlePiEvent({ type: "agent_end" });
+
+    expect(actions).toEqual([]);
+  });
+
+  it("does NOT send typing when currentChatId is 0 (no active session)", () => {
+    const actions: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendChatAction: async (_c, a) => { actions.push(a); },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.currentChatId = 0;
+
+    gateway.handlePiEvent({ type: "message_start" });
+
+        expect(actions).toEqual([]);
+  });
+
+  it("sends tool call message when showTools is enabled", async () => {
+    const sent: { text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text, other) => { sent.push({ text, other }); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.showTools = true;
+    gateway.currentChatId = 123;
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.other).toEqual({ parse_mode: "HTML" });
+    expect(sent[0]!.text).toContain('<pre>');
+    expect(sent[0]!.text).toContain('bash');
+    expect(sent[0]!.text).toContain('"ls"');
+  });
+
+  it("does NOT send tool call message when showTools is disabled", () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.showTools = false;
+    gateway.currentChatId = 123;
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
+
+    expect(sent).toEqual([]);
+  });
+
+  it("does NOT send tool call message when currentChatId is 0", () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.showTools = true;
+    gateway.currentChatId = 0;
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
+
+    expect(sent).toEqual([]);
+  });
+
+  it("still counts tools in turnToolCounts regardless of showTools", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.showTools = false;
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+
+    expect(gateway.turnToolCounts.get("bash")).toBe(1);
+  });
+
+  it("deletes session, resets state, and starts new session on get_state response", async () => {
+    const sent: { chatId: number | string; text: string }[] = [];
+    const piCommands: object[] = [];
+    const deletedPaths: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (chatId, text) => { sent.push({ chatId, text }); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    gateway.deleteRequestChatId = 123;
+    gateway.sessionPicker.set("sid-1", { path: "/fake/sid-1.jsonl", id: "sid-1", created: "2026-05-15T00:00:00.000Z", mtime: 1 });
+
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: { sessionId: "sid-1", sessionFile: "sid-1.jsonl" },
+    });
+
+    expect(deletedPaths).toEqual(["/fake/sid-1.jsonl"]);
+    expect(piCommands).toEqual([{ type: "new_session" }]);
+    expect(gateway.deleteRequestChatId).toBe(0);
+    expect(gateway.piStreaming).toBe(false);
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toEqual({ chatId: 123, text: "Session deleted. New session started." });
+  });
+
+  it("skips unlink when session not in picker, still resets and starts new", async () => {
+    const sent: string[] = [];
+    const piCommands: object[] = [];
+    const deletedPaths: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.deleteRequestChatId = 123;
+
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: { sessionId: "nonexistent" },
+    });
+
+    expect(deletedPaths).toEqual([]);
+    expect(piCommands).toEqual([{ type: "new_session" }]);
+    expect(sent).toEqual(["Session deleted. New session started."]);
+    expect(gateway.deleteRequestChatId).toBe(0);
+  });
+
+  it("still resets and starts new session when get_state data has no sessionId", async () => {
+    const sent: string[] = [];
+    const piCommands: object[] = [];
+    const deletedPaths: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.deleteRequestChatId = 123;
+
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: {},
+    });
+
+    expect(deletedPaths).toEqual([]);
+    expect(piCommands).toEqual([{ type: "new_session" }]);
+    expect(sent).toEqual(["Session deleted. New session started."]);
+  });
+
+  it("does NOT trigger delete logic on non-get_state responses with deleteRequestChatId set", () => {
+    const deletedPaths: string[] = [];
+    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
+    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
+    gateway.sendPi = () => {};
+    gateway.deleteRequestChatId = 123;
+
+    gateway.handlePiEvent({
+      type: "response", command: "get_session_stats", success: true,
+      data: { sessionId: "sid-1" },
+    });
+
+    expect(deletedPaths).toEqual([]);
+  });
+
+  it("proceeds with reset+new even if deleteFile throws", async () => {
+    // XXX: only testing ENOENT here since it's the expected non-fatal error
+    const sent: string[] = [];
+    const piCommands: object[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.deleteFile = async () => { const e: NodeJS.ErrnoException = new Error("ENOENT"); e.code = "ENOENT"; throw e; };
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.deleteRequestChatId = 123;
+    gateway.sessionPicker.set("sid-1", { path: "/fake/sid-1.jsonl", id: "sid-1", created: "2026-05-15T00:00:00.000Z", mtime: 1 });
+
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: { sessionId: "sid-1" },
+    });
+
+    expect(piCommands).toEqual([{ type: "new_session" }]);
+    expect(sent).toEqual(["Session deleted. New session started."]);
+  });
 });
+
+
 
 describe("Integration: replay recorded fixture", () => {
   it("replays hello-robot.jsonl and produces expected final text", async () => {

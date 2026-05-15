@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { unlink } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
@@ -65,6 +66,8 @@ interface PiEvent {
     errorMessage?: string;
   }>;
   toolName?: string;
+  toolCallId?: string;
+  args?: Record<string, unknown>;
 }
 
 // ============================================================
@@ -74,6 +77,7 @@ interface PiEvent {
 export interface TelegramApi {
   sendMessage(chatId: number | string, text: string, other?: Record<string, unknown>): Promise<{ message_id: number }>;
   editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
+  sendChatAction(chatId: number | string, action: string): Promise<unknown>;
 }
 
 export interface MessageContext {
@@ -243,6 +247,21 @@ function createSafeEditor(
   };
 }
 
+function htmlEscape(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function formatToolCall(args: unknown, toolName: string): string {
+  let argStr = "";
+  if (args != null) {
+    const json = JSON.stringify(args);
+    const max = 250;
+    argStr = htmlEscape(json.length > max ? json.slice(0, max - 3) + "..." : json);
+  }
+  const tn = htmlEscape(toolName);
+  return `<pre>\uD83D\uDD27 ${tn}${argStr ? `: ${argStr}` : ""}</pre>`;
+}
+
 export class Gateway {
   piClient: PiClient | null = null;
   piStreaming = false;
@@ -255,9 +274,13 @@ export class Gateway {
   turnToolCounts: Map<string, number> = new Map();
   showThinking = false;
   rawMode = false;
+  lastTypingSent = 0;
+  showTools = false;
+  deleteRequestChatId: number | string = 0;
   sessionPicker: Map<string, SessionInfo> = new Map();
   allowedUserId: number;
   api: TelegramApi;
+  deleteFile: (path: string) => Promise<void> = unlink;
 
   constructor(options: { allowedUserId: number; api: TelegramApi }) {
     this.allowedUserId = options.allowedUserId;
@@ -277,6 +300,10 @@ export class Gateway {
       console.error(`[pi] event JSON: ${JSON.stringify(event)}`);
     }
 
+    if (type !== "response" && type !== "agent_end" && this.currentChatId) {
+      this.sendTyping(this.currentChatId);
+    }
+
     if (type === "response") {
       const resp = event as PiResponse;
       if (!resp.success) {
@@ -285,6 +312,36 @@ export class Gateway {
         dbg(1, `pi response ok: ${resp.command}`);
         if (resp.command === "get_state" && this.lastChatId) {
           this.showStatus(this.lastChatId, resp.data);
+        }
+        if (resp.command === "get_state" && this.deleteRequestChatId) {
+          const chatId = this.deleteRequestChatId;
+          this.deleteRequestChatId = 0;
+          const data = resp.data as { sessionId?: string; sessionFile?: string } | undefined;
+          const sessionId = data?.sessionId;
+          try {
+            let info = sessionId ? this.sessionPicker.get(sessionId) : undefined;
+            if (!info && sessionId) {
+              this.scanRecentSessions();
+              info = this.sessionPicker.get(sessionId);
+            }
+            if (info) {
+              await this.deleteFile(info.path);
+              dbg(1, `deleteSession: unlinked ${info.path}`);
+            } else {
+              console.error(`[delete] session ${sessionId ?? "?"} not found in picker; skipping unlink`);
+            }
+          } catch (err: any) {
+            if (err?.code !== "ENOENT") {
+              console.error(`[delete] unlink failed: ${err?.message ?? err}`);
+            }
+          }
+          this.resetSession();
+          this.sendPi({ type: "new_session" });
+          try {
+            await this.api.sendMessage(chatId, "Session deleted. New session started.");
+          } catch (e) {
+            console.error(`[delete] sendMessage failed: ${e}`);
+          }
         }
         if (resp.command === "get_session_stats" && this.lastChatId) {
           this.showStats(this.lastChatId, resp.data);
@@ -376,8 +433,14 @@ export class Gateway {
     }
 
     if (type === "tool_execution_start") {
-      const toolName = (event as PiEvent).toolName;
+      const e = event as PiEvent;
+      const toolName = e.toolName;
       if (toolName && typeof toolName === 'string') {
+        if (this.showTools && this.currentChatId) {
+          const label = formatToolCall(e.args, toolName);
+          this.api.sendMessage(this.currentChatId, label, { parse_mode: "HTML" })
+            .catch((err: Error) => console.error(`[telegram] tool call msg failed: ${err.message}`));
+        }
         this.turnToolCounts.set(toolName, (this.turnToolCounts.get(toolName) ?? 0) + 1);
       }
       return;
@@ -386,6 +449,13 @@ export class Gateway {
     // XXX: other events not handled yet (extension_ui, etc.)
     dbg(1, `unhandled pi event type: ${type}`);
   };
+
+  sendTyping(chatId: number | string): void {
+    const now = Date.now();
+    if (now - this.lastTypingSent < 4000) return;
+    this.lastTypingSent = now;
+    this.api.sendChatAction?.(chatId, "typing")?.catch(() => {});
+  }
 
   sendPi(cmd: Record<string, unknown>): void {
     const raw = JSON.stringify(cmd);
@@ -669,31 +739,59 @@ if (import.meta.main) {
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
   });
 
-  bot.command("raw", async (ctx) => {
+  bot.command("showtools", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     const kb = new InlineKeyboard()
-      .text(gateway.rawMode ? "✅ Raw" : "Raw", "raw:on")
-      .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "raw:off");
+      .text(gateway.showTools ? "✅ On" : "On", "showtools:on")
+      .text(gateway.showTools ? "Off" : "✅ Off", "showtools:off");
+    await ctx.reply("Show tool calls?", { reply_markup: kb });
+  });
+
+  bot.callbackQuery("showtools:on", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.showTools = true;
+    await ctx.answerCallbackQuery("Enabled.");
+    const kb = new InlineKeyboard()
+      .text("✅ On", "showtools:on")
+      .text("Off", "showtools:off");
+    await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  });
+
+  bot.callbackQuery("showtools:off", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.showTools = false;
+    await ctx.answerCallbackQuery("Disabled.");
+    const kb = new InlineKeyboard()
+      .text("On", "showtools:on")
+      .text("✅ Off", "showtools:off");
+    await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  });
+
+  bot.command("showraw", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    const kb = new InlineKeyboard()
+      .text(gateway.rawMode ? "✅ Raw" : "Raw", "showraw:on")
+      .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "showraw:off");
     await ctx.reply("Output format:", { reply_markup: kb });
   });
 
-  bot.callbackQuery("raw:on", async (ctx) => {
+  bot.callbackQuery("showraw:on", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.rawMode = true;
     await ctx.answerCallbackQuery("Raw mode. No formatting.");
     const kb = new InlineKeyboard()
-      .text("✅ Raw", "raw:on")
-      .text("MarkdownV2", "raw:off");
+      .text("✅ Raw", "showraw:on")
+      .text("MarkdownV2", "showraw:off");
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
   });
 
-  bot.callbackQuery("raw:off", async (ctx) => {
+  bot.callbackQuery("showraw:off", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
     gateway.rawMode = false;
     await ctx.answerCallbackQuery("MarkdownV2 mode.");
     const kb = new InlineKeyboard()
-      .text("Raw", "raw:on")
-      .text("✅ MarkdownV2", "raw:off");
+      .text("Raw", "showraw:on")
+      .text("✅ MarkdownV2", "showraw:off");
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
   });
 
@@ -708,6 +806,13 @@ if (import.meta.main) {
 
     gateway.sendPi({ type: "set_session_name", name });
     await ctx.reply("Named.");
+  });
+
+  bot.command("delete", async (ctx) => {
+    if (ctx.from?.id !== allowedUserId) return;
+    gateway.deleteRequestChatId = ctx.chatId;
+    gateway.sendPi({ type: "get_state" });
+    await ctx.reply("Deleting session...");
   });
 
   bot.command("resume", async (ctx) => {
@@ -776,8 +881,10 @@ if (import.meta.main) {
     { command: "context",   description: "Show token usage & cost stats" },
     { command: "last",      description: "Show last assistant response text" },
     { command: "showthink", description: "Toggle thinking block visibility" },
-    { command: "raw",       description: "Toggle raw/MarkdownV2 message formatting" },
+    { command: "showtools", description: "Toggle live tool call messages" },
+    { command: "showraw",  description: "Toggle raw/MarkdownV2 message formatting" },
     { command: "resume",    description: "Switch to a previous session" },
+    { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "name",      description: "Set a display name for the current session" },
   ]);
 
