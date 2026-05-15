@@ -14,7 +14,7 @@ Four files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.
 ### Pipeline
 
 1. Telegram user sends a text message or slash command
-2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`
+2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`. Known slash commands are intercepted by `bot.command()` handlers; unknown ones (e.g. `/skill:name`, `/model`) pass through as regular prompts to Pi.
 3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi. While pi is working, a "typing..." indicator is sent to Telegram reactively (on each incoming Pi event, with 4s cooldown to avoid rate limits). Stops naturally when events stop arriving (~5s Telegram expiry).
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
 5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
@@ -71,12 +71,15 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 - Extension UI dialogs (`select`, `confirm`, `input`, `editor`) not forwarded to user yet
 - Message queue is in-memory only — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
-- Other builtin slash commands (`/model`, `/compact`, `/fork`, `/clone`, etc.) not registered yet
 - `/resume` shows only 8 most recent; no pagination
 
 ### Pi/provider gotcha
 
 Pi stores assistant `thinking` blocks with `thinkingSignature: "reasoning"` in the session history. When sending the history to providers using the `openai-completions` API (e.g. `opencode-go` / `kimi-k2.6`), Pi includes those `reasoning` fields in the messages array. Some providers reject them as extra/unknown inputs, producing a `400 Error from provider: Extra inputs are not permitted, field: 'messages[N].reasoning'` and an empty assistant response. The gateway now surfaces this error to the user instead of leaving a frozen placeholder. A `/new` session clears the history and temporarily fixes it.
+
+### Pi skill expansion
+
+Skills are triggered by prefixing a prompt with `/skill:name`. When Pi receives `{"type":"prompt", "message":"/skill:skill-name args"}`, it expands the skill server-side — loading the skill's `SKILL.md`, stripping YAML frontmatter, and wrapping the body in `<skill>` XML before appending user arguments. The LLM sees the expanded content, not the `/skill:` invocation. Available skills are discoverable via `{"type":"get_commands"}` RPC. See `pi/packages/coding-agent/docs/rpc.md` lines 68, 79, 103, 701-738 and `pi/packages/coding-agent/src/core/agent-session.ts:_expandSkillCommand()`.
 
 ## Configuration (`.env`)
 
@@ -112,7 +115,7 @@ bun test           # run tests
 
 **`Gateway` class** — all mutable state + business logic:
 
-- `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, ignores `/` commands, enqueues or starts a pi session.
+- `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, starts or enqueues a pi session. Unknown slash commands (not intercepted by `bot.command()`) pass through as regular prompts.
 - `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt",...}` to pi.
 - `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
   - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()` when `lastChatId` is set. Also handles `/delete` flow when `deleteRequestChatId` is set: extracts `sessionId` from `get_state` response, looks up `SessionInfo.path` in `sessionPicker` (rescans only if not found), deletes the `.jsonl` file, then `resetSession()` + `new_session` + confirmation message.

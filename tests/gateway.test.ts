@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Gateway, formatToolCall, type TelegramApi, type MessageContext } from "../index";
+import { Gateway } from "../index";
+import { formatToolCall, type TelegramApi, type MessageContext } from "../telegram";
 import { loadFixtureLines, extractTextDeltas } from "./helpers";
 import type { PiClient } from "../pi-client";
 
@@ -67,15 +68,15 @@ describe("Gateway.handleTextMessage", () => {
     expect(replies).toEqual(["⏳ Queued."]);
   });
 
-  it("ignores messages starting with /", async () => {
+  it("passes unknown slash commands to Pi as prompts", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const ctx = mockContext({ msg: { text: "/start" } });
+    const ctx = mockContext({ msg: { text: "/skill:test" } });
 
     await gateway.handleTextMessage(ctx, api);
 
-    expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
+    expect(gateway.piStreaming).toBe(true);
+    expect(gateway.currentRelay).not.toBeNull();
   });
 });
 
