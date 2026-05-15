@@ -5,7 +5,7 @@ import { unlink } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
-import { createSafeEditor, formatToolCall, htmlEscape, splitTelegramText, type TelegramApi, type MessageContext } from "./telegram";
+import { createSafeEditor, formatToolCall, htmlEscape, splitTelegramText, downloadTelegramFile, type TelegramApi, type MessageContext, type PhotoMessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
 
 // ============================================================
@@ -73,6 +73,12 @@ interface PiEvent {
   args?: Record<string, unknown>;
 }
 
+interface ImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
 interface ModelInfo {
   id?: string;
   name?: string;
@@ -90,6 +96,7 @@ interface ModelInfo {
 interface QueuedMessage {
   chatId: number | string;
   text: string;
+  images?: ImageContent[];
 }
 
 export class Gateway {
@@ -112,12 +119,15 @@ export class Gateway {
   modelFilter?: string;
   allowedUserId: number;
   api: TelegramApi;
+  botToken: string;
+  downloadFile = (fileId: string) => downloadTelegramFile(this.api, this.botToken, fileId);
   deleteFile: (path: string) => Promise<void> = unlink;
   startedAt = new Date();
 
-  constructor(options: { allowedUserId: number; api: TelegramApi }) {
+  constructor(options: { allowedUserId: number; api: TelegramApi; botToken?: string }) {
     this.allowedUserId = options.allowedUserId;
     this.api = options.api;
+    this.botToken = options.botToken ?? "";
   }
 
   handlePiEvent = async (event: PiEvent | PiResponse): Promise<void> => {
@@ -316,8 +326,9 @@ export class Gateway {
     chatId: number | string,
     text: string,
     api: TelegramApi = this.api,
+    images?: ImageContent[],
   ): Promise<void> {
-    dbg(1, `startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+    dbg(1, `startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" images=${images?.length ?? 0}`);
     this.piStreaming = true;
     this.currentChatId = chatId;
     this.lastPiError = undefined;
@@ -336,7 +347,9 @@ export class Gateway {
       log: (msg) => dbg(1, msg),
     });
 
-    this.sendPi({ type: "prompt", message: text });
+    const cmd: Record<string, unknown> = { type: "prompt", message: text };
+    if (images && images.length > 0) cmd.images = images;
+    this.sendPi(cmd);
   }
 
   processQueue(api: TelegramApi = this.api): void {
@@ -344,7 +357,7 @@ export class Gateway {
     if (this.piStreaming) return;
     const next = this.queue.shift();
     if (!next) return;
-    this.startPiSession(next.chatId, next.text, api);
+    this.startPiSession(next.chatId, next.text, api, next.images);
   }
 
   resetSession(): void {
@@ -612,6 +625,51 @@ export class Gateway {
 
     await this.startPiSession(ctx.chatId, text, api);
   }
+
+  async handlePhotoMessage(
+    ctx: PhotoMessageContext,
+    api: TelegramApi = this.api,
+  ): Promise<void> {
+    const userId = ctx.from?.id;
+    dbg(1, `message:photo from user=${userId} chat=${ctx.chatId} caption="${ctx.msg.caption?.slice(0, 80) ?? ""}"`);
+
+    if (userId === undefined || userId !== this.allowedUserId) {
+      dbg(1, `rejected user ${userId} (allowed: ${this.allowedUserId})`);
+      return;
+    }
+
+    const text = ctx.msg.caption ?? "";
+
+    if (verbosity >= 2) {
+      dbg(2, `telegram photo msg: ${JSON.stringify({ userId, chatId: ctx.chatId, caption: text })}`);
+    }
+
+    const photos = ctx.msg.photo;
+    if (!photos || photos.length === 0) return;
+
+    const largest = photos.reduce((a, b) =>
+      (a.file_size ?? 0) >= (b.file_size ?? 0) ? a : b
+    );
+
+    let images: ImageContent[];
+    try {
+      const buffer = await this.downloadFile(largest.file_id);
+      images = [{ type: "image", data: buffer.toString("base64"), mimeType: "image/jpeg" }];
+    } catch (err) {
+      console.error(`[telegram] photo download failed: ${err instanceof Error ? err.message : String(err)}`);
+      await ctx.reply("Failed to download photo.");
+      return;
+    }
+
+    if (this.piStreaming) {
+      dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
+      this.queue.push({ chatId: ctx.chatId, text, images });
+      await ctx.reply("⏳ Queued.");
+      return;
+    }
+
+    await this.startPiSession(ctx.chatId, text, api, images);
+  }
 }
 
 // ============================================================
@@ -629,7 +687,7 @@ if (import.meta.main) {
   dbg(1, `PI_PATH=${PI_PATH}`);
   dbg(1, `allowedUserId=${allowedUserId}`);
 
-  const gateway = new Gateway({ allowedUserId, api: bot.api });
+  const gateway = new Gateway({ allowedUserId, api: bot.api, botToken: TOKEN });
 
   function spawnPi(): void {
     const args = ["--mode", "rpc"];
@@ -668,9 +726,10 @@ if (import.meta.main) {
 
   bot.command("new", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
+    const dir = ctx.match?.trim();
     gateway.resetSession();
-    gateway.sendPi({ type: "new_session" });
-    await ctx.reply("🆕 New session.");
+    gateway.sendPi({ type: "new_session", ...(dir ? { cwd: dir } : {}) });
+    await ctx.reply(dir ? `🆕 New session in ${dir}.` : "🆕 New session.");
   });
 
   bot.command("status", async (ctx) => {
@@ -871,6 +930,11 @@ if (import.meta.main) {
 
   bot.on("message:text", async (ctx) => {
     await gateway.handleTextMessage(ctx, ctx.api);
+  });
+
+  bot.on("message:photo", async (ctx) => {
+    // grammy context satisfies PhotoMessageContext (has photo[], optional caption)
+    await gateway.handlePhotoMessage(ctx as unknown as PhotoMessageContext, ctx.api);
   });
 
   // Clear any chat-scoped commands from other bots (chat-scope overrides global scope)

@@ -6,12 +6,45 @@ export interface TelegramApi {
   sendMessage(chatId: number | string, text: string, other?: Record<string, unknown>): Promise<{ message_id: number }>;
   editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
   sendChatAction(chatId: number | string, action: string): Promise<unknown>;
+  getFile(fileId: string): Promise<{ file_path?: string }>;
+}
+
+export async function downloadTelegramFile(
+  api: TelegramApi,
+  botToken: string,
+  fileId: string,
+): Promise<Buffer> {
+  const file = await api.getFile(fileId);
+  if (!file.file_path) throw new Error("Telegram getFile: no file_path");
+  const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Telegram file download failed: ${response.status}`);
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
 }
 
 export interface MessageContext {
   chatId: number | string;
   from?: { id: number };
   msg: { text?: string };
+  reply(text: string): Promise<unknown>;
+}
+
+export interface PhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+export interface PhotoMessageContext {
+  chatId: number | string;
+  from?: { id: number };
+  msg: {
+    caption?: string;
+    photo: PhotoSize[];
+  };
   reply(text: string): Promise<unknown>;
 }
 

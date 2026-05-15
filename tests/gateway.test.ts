@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gateway } from "../index";
-import { formatToolCall, type TelegramApi, type MessageContext } from "../telegram";
+import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext } from "../telegram";
 import { loadFixtureLines, extractTextDeltas } from "./helpers";
 import type { PiClient } from "../pi-client";
 
@@ -12,6 +12,7 @@ function mockApi(): TelegramApi {
     sendMessage: async () => ({ message_id: 42 }),
     editMessageText: async () => ({}),
     sendChatAction: async () => ({}),
+    getFile: async () => ({ file_path: "test/photo.jpg" }),
   };
 }
 
@@ -20,6 +21,22 @@ function mockContext(overrides: Partial<MessageContext> = {}): MessageContext {
     chatId: 123,
     from: { id: 8476228873 },
     msg: { text: "hello pi" },
+    reply: async () => {},
+    ...overrides,
+  };
+}
+
+function mockPhotoContext(overrides: Partial<PhotoMessageContext> = {}): PhotoMessageContext {
+  return {
+    chatId: 123,
+    from: { id: 8476228873 },
+    msg: {
+      caption: "what's in this photo",
+      photo: [
+        { file_id: "small", file_unique_id: "u1", width: 100, height: 100, file_size: 1000 },
+        { file_id: "large", file_unique_id: "u2", width: 800, height: 600, file_size: 50000 },
+      ],
+    },
     reply: async () => {},
     ...overrides,
   };
@@ -1585,5 +1602,190 @@ describe("Integration: /resume then /last", () => {
     expect(messages.length).toBe(1);
     expect(messages[0]!.chatId).toBe(789);
     expect(messages[0]!.text).toBe("The auth bug is fixed\\.");
+  });
+});
+
+describe("Gateway.handlePhotoMessage", () => {
+  it("rejects unauthorized user", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 999, api });
+    gateway.downloadFile = async () => Buffer.from("fake");
+    const ctx = mockPhotoContext({ from: { id: 111 } });
+    let replied = false;
+    ctx.reply = async () => { replied = true; };
+
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(gateway.queue.length).toBe(0);
+    expect(gateway.piStreaming).toBe(false);
+    expect(replied).toBe(false);
+  });
+
+  it("starts a session with caption and image when pi is idle", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("test");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockPhotoContext();
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(gateway.piStreaming).toBe(true);
+    expect(piCommands).toEqual([{
+      type: "prompt",
+      message: "what's in this photo",
+      images: [{
+        type: "image",
+        data: Buffer.from("test").toString("base64"),
+        mimeType: "image/jpeg",
+      }],
+    }]);
+  });
+
+  it("uses empty message when photo has no caption", async () => {
+    const piCommands: object[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("img");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockPhotoContext({ msg: { caption: undefined, photo: mockPhotoContext().msg.photo } });
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(piCommands[0]).toHaveProperty("message", "");
+    expect(piCommands[0]).toHaveProperty("images");
+  });
+
+  it("picks the largest photo by file_size", async () => {
+    const downloadedIds: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async (fileId) => { downloadedIds.push(fileId); return Buffer.from("img"); };
+    gateway.sendPi = () => {};
+
+    const ctx = mockPhotoContext({
+      msg: {
+        caption: undefined,
+        photo: [
+          { file_id: "tiny", file_unique_id: "u1", width: 10, height: 10, file_size: 100 },
+          { file_id: "big", file_unique_id: "u2", width: 800, height: 600, file_size: 99999 },
+          { file_id: "mid", file_unique_id: "u3", width: 320, height: 240, file_size: 5000 },
+        ],
+      },
+    });
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(downloadedIds).toEqual(["big"]);
+  });
+
+  it("replies 'Failed to download photo.' on download error", async () => {
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => { throw new Error("network down"); };
+
+    const ctx = mockPhotoContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(replies).toEqual(["Failed to download photo."]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("queues message with images when pi is busy", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.piStreaming = true;
+    gateway.downloadFile = async () => Buffer.from("busy-img");
+    const replies: string[] = [];
+    const ctx = mockPhotoContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(gateway.queue.length).toBe(1);
+    expect(gateway.queue[0]!.text).toBe("what's in this photo");
+    expect(gateway.queue[0]!.images).toEqual([{
+      type: "image",
+      data: Buffer.from("busy-img").toString("base64"),
+      mimeType: "image/jpeg",
+    }]);
+    expect(replies).toEqual(["⏳ Queued."]);
+  });
+
+  it("processQueue dequeues message with images and starts session", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("img");
+    gateway.sendPi = () => {};
+
+    gateway.queue.push({
+      chatId: 123,
+      text: "see this",
+      images: [{ type: "image", data: "aa==", mimeType: "image/png" }],
+    });
+    gateway.piStreaming = false;
+
+    gateway.processQueue(api);
+
+    expect(gateway.piStreaming).toBe(true);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("startPiSession includes images in RPC command", async () => {
+    const piCommands: object[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async () => ({ message_id: 11 }),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    await gateway.startPiSession(123, "look", api, [
+      { type: "image", data: "bb==", mimeType: "image/png" },
+    ]);
+
+    expect(piCommands).toEqual([{
+      type: "prompt",
+      message: "look",
+      images: [{ type: "image", data: "bb==", mimeType: "image/png" }],
+    }]);
+  });
+
+  it("startPiSession omits images when empty array", async () => {
+    const piCommands: object[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async () => ({ message_id: 12 }),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    await gateway.startPiSession(123, "hello", api, []);
+
+    expect(piCommands).toEqual([{
+      type: "prompt",
+      message: "hello",
+    }]);
+  });
+
+  it("startPiSession omits images when undefined", async () => {
+    const piCommands: object[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async () => ({ message_id: 13 }),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    await gateway.startPiSession(123, "hello", api);
+
+    expect(piCommands).toEqual([{
+      type: "prompt",
+      message: "hello",
+    }]);
   });
 });
