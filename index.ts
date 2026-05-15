@@ -992,6 +992,11 @@ if (import.meta.main) {
 
 
   spawnPi();
+  gateway.lastChatId = allowedUserId;
+  gateway.sendPi({ type: "get_state" });
+  bot.api.sendMessage(allowedUserId, "👋 kklaw online!").catch((err: Error) =>
+    console.error(`[telegram] welcome send failed: ${err.message}`),
+  );
 
   const watcher = new InjectWatcher(INJECT_DIR, (text, filename) => gateway.injectPrompt(text, filename));
   watcher.start();
