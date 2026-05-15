@@ -244,7 +244,6 @@ describe("Gateway.handlePiEvent", () => {
     });
 
     await gateway.startPiSession(123, "test");
-    gateway.showThinking = true;
 
     gateway.handlePiEvent({
       type: "message_update",
@@ -256,38 +255,6 @@ describe("Gateway.handlePiEvent", () => {
     expect(edits.length).toBe(1);
     expect(edits[0]!.text).toBe("> hmm\\.\\.\\.\n");
     expect(edits[0]!.parse_mode).toBe("MarkdownV2");
-  });
-
-  it("drops thinking_delta when showThinking is false (default)", async () => {
-    const edits: string[] = [];
-    const gateway = new Gateway({
-      allowedUserId: 1,
-      api: {
-        sendMessage: async () => ({ message_id: 1 }),
-        editMessageText: async (_c, _m, text) => { edits.push(text); },
-      },
-    });
-
-    await gateway.startPiSession(123, "test");
-
-    // Fire a thinking_delta — should be swallowed
-    gateway.handlePiEvent({
-      type: "message_update",
-      assistantMessageEvent: { type: "thinking_delta", delta: "secret reasoning" },
-    });
-
-    // Fire a text_delta — should still come through
-    gateway.handlePiEvent({
-      type: "message_update",
-      assistantMessageEvent: { type: "text_delta", delta: "visible answer" },
-    });
-
-    await gateway.currentRelay!.onDone();
-
-    // Only the text delta should appear, no thinking blockquote
-    expect(edits.length).toBe(1);
-    expect(edits[0]).not.toContain("secret reasoning");
-    expect(edits[0]).toContain("visible answer");
   });
 
   it("clears state on agent_end and processes queue", async () => {
@@ -494,59 +461,9 @@ describe("Gateway.handlePiEvent", () => {
         expect(actions).toEqual([]);
   });
 
-  it("sends tool call message when showTools is enabled", async () => {
-    const sent: { text: string; other?: Record<string, unknown> }[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text, other) => { sent.push({ text, other }); return { message_id: 1 }; },
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.showTools = true;
-    gateway.currentChatId = 123;
-
-    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
-
-    expect(sent.length).toBe(1);
-    expect(sent[0]!.other).toEqual({ parse_mode: "HTML" });
-    expect(sent[0]!.text).toContain('<pre>');
-    expect(sent[0]!.text).toContain('bash');
-    expect(sent[0]!.text).toContain('"ls"');
-  });
-
-  it("does NOT send tool call message when showTools is disabled", () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.showTools = false;
-    gateway.currentChatId = 123;
-
-    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
-
-    expect(sent).toEqual([]);
-  });
-
-  it("does NOT send tool call message when currentChatId is 0", () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.showTools = true;
-    gateway.currentChatId = 0;
-
-    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
-
-    expect(sent).toEqual([]);
-  });
-
-  it("still counts tools in turnToolCounts regardless of showTools", () => {
+  it("counts tools in turnToolCounts", () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.showTools = false;
 
     gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
 
@@ -678,7 +595,6 @@ describe("Integration: replay recorded fixture", () => {
     };
 
     const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.showThinking = true;
     await gateway.startPiSession(123, "Hello robot!", api);
 
     for (const line of lines) {
@@ -880,9 +796,6 @@ describe("Gateway.showDaemonStatus", () => {
     expect(messages[0]!.text).toContain("not connected");
     expect(messages[0]!.text).toContain("idle");
     expect(messages[0]!.text).toContain("Queue depth:");
-    expect(messages[0]!.text).toContain("Thinking:");
-    expect(messages[0]!.text).toContain("Show tools:");
-    expect(messages[0]!.text).toContain("Raw mode:");
   });
 
   it("shows running Pi with pid when piClient is connected", async () => {
@@ -930,24 +843,6 @@ describe("Gateway.showDaemonStatus", () => {
     expect(messages[0]!.text).toContain("Queue depth:  3");
   });
 
-  it("shows toggle states on/off correctly", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.showThinking = true;
-    gateway.showTools = true;
-    gateway.rawMode = true;
-
-    await gateway.showDaemonStatus(1);
-
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("Thinking:     on");
-    expect(messages[0]!.text).toContain("Show tools:   on");
-    expect(messages[0]!.text).toContain("Raw mode:     on");
-  });
 });
 
 describe("Gateway.showLastMessage (/last)", () => {

@@ -5,7 +5,7 @@ import { unlink } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
-import { createSafeEditor, formatToolCall, htmlEscape, splitTelegramText, downloadTelegramFile, type TelegramApi, type MessageContext, type PhotoMessageContext } from "./telegram";
+import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, type TelegramApi, type MessageContext, type PhotoMessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
 
 // ============================================================
@@ -109,10 +109,7 @@ export class Gateway {
   currentPlaceholderMessageId: number = 0;
   lastPiError?: string;
   turnToolCounts: Map<string, number> = new Map();
-  showThinking = false;
-  rawMode = false;
   lastTypingSent = 0;
-  showTools = false;
   deleteRequestChatId: number | string = 0;
   bashRequestChatId: number | string = 0;
   sessionPicker: Map<string, SessionInfo> = new Map();
@@ -217,9 +214,7 @@ export class Gateway {
       if (delta?.type === "text_delta" && delta.delta) {
         this.currentRelay?.onDelta(delta.delta, 'text');
       } else if (delta?.type === "thinking_delta" && delta.delta) {
-        if (this.showThinking) {
-          this.currentRelay?.onDelta(delta.delta, 'thinking');
-        }
+        this.currentRelay?.onDelta(delta.delta, 'thinking');
       } else if (delta?.type === "error") {
         const reason = delta.reason ?? "unknown";
         console.error(`[pi] stream error: ${reason}`);
@@ -298,11 +293,6 @@ export class Gateway {
       const e = event as PiEvent;
       const toolName = e.toolName;
       if (toolName && typeof toolName === 'string') {
-        if (this.showTools && this.currentChatId) {
-          const label = formatToolCall(e.args, toolName);
-          this.api.sendMessage(this.currentChatId, label, { parse_mode: "HTML" })
-            .catch((err: Error) => console.error(`[telegram] tool call msg failed: ${err.message}`));
-        }
         this.turnToolCounts.set(toolName, (this.turnToolCounts.get(toolName) ?? 0) + 1);
       }
       return;
@@ -359,14 +349,13 @@ export class Gateway {
     }
     this.currentPlaceholderMessageId = placeholder.message_id;
 
-    const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg), this.rawMode);
+    const editor = createSafeEditor(api, chatId, this.currentPlaceholderMessageId, (msg) => dbg(1, msg));
 
     this.currentRelay = createRelay({
       edit: (buf, isFinal) =>
         editor.edit(buf, isFinal).catch((err: Error) =>
           console.error(`[telegram] edit failed: ${err.message}`),
         ),
-      rawMode: this.rawMode,
       log: (msg) => dbg(1, msg),
     });
 
@@ -463,19 +452,11 @@ export class Gateway {
       `🔄 Pi:           ${piStatus}`,
       `📡 Pi streaming: ${streaming}`,
       `📋 Queue depth:  ${this.queue.length}`,
-      `💭 Thinking:     ${this.showThinking ? "on" : "off"}`,
-      `🔧 Show tools:   ${this.showTools ? "on" : "off"}`,
-      `📝 Raw mode:     ${this.rawMode ? "on" : "off"}`,
     ];
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showDaemonStatus failed: ${err.message}`),
     );
-  }
-
-  formatForTelegram(rawText: string): { text: string; other?: Record<string, unknown> } {
-    if (this.rawMode) return { text: rawText };
-    return { text: escapeText(rawText), other: { parse_mode: "MarkdownV2" } };
   }
 
   async showLastMessage(chatId: number | string, data: unknown): Promise<void> {
@@ -488,8 +469,7 @@ export class Gateway {
       );
       return;
     }
-    const msg = this.formatForTelegram(text);
-    await this.api.sendMessage(chatId, msg.text, msg.other).catch((err: Error) =>
+    await this.api.sendMessage(chatId, escapeText(text), { parse_mode: "MarkdownV2" }).catch((err: Error) =>
       console.error(`[telegram] showLastMessage failed: ${err.message}`),
     );
   }
@@ -784,84 +764,6 @@ if (import.meta.main) {
     gateway.sendPi({ type: "get_last_assistant_text" });
   });
 
-  bot.command("showthink", async (ctx) => {
-    dbg(1, "/showthink");
-    const kb = new InlineKeyboard()
-      .text(gateway.showThinking ? "✅ Yes" : "Yes", "showthink:yes")
-      .text(gateway.showThinking ? "No" : "✅ No", "showthink:no");
-    await ctx.reply("💭 Show LLM thinking?", { reply_markup: kb });
-  });
-
-  bot.callbackQuery("showthink:yes", async (ctx) => {
-    gateway.showThinking = true;
-    await ctx.answerCallbackQuery("✅ Enabled.");
-    const kb = new InlineKeyboard()
-      .text("✅ Yes", "showthink:yes")
-      .text("No", "showthink:no");
-    await ctx.editMessageReplyMarkup({ reply_markup: kb });
-  });
-
-  bot.callbackQuery("showthink:no", async (ctx) => {
-    gateway.showThinking = false;
-    await ctx.answerCallbackQuery("❌ Disabled.");
-    const kb = new InlineKeyboard()
-      .text("Yes", "showthink:yes")
-      .text("✅ No", "showthink:no");
-    await ctx.editMessageReplyMarkup({ reply_markup: kb });
-  });
-
-  bot.command("showtools", async (ctx) => {
-    dbg(1, "/showtools");
-    const kb = new InlineKeyboard()
-      .text(gateway.showTools ? "✅ On" : "On", "showtools:on")
-      .text(gateway.showTools ? "Off" : "✅ Off", "showtools:off");
-    await ctx.reply("🔧 Show tool calls?", { reply_markup: kb });
-  });
-
-  bot.callbackQuery("showtools:on", async (ctx) => {
-    gateway.showTools = true;
-    await ctx.answerCallbackQuery("✅ Enabled.");
-    const kb = new InlineKeyboard()
-      .text("✅ On", "showtools:on")
-      .text("Off", "showtools:off");
-    await ctx.editMessageReplyMarkup({ reply_markup: kb });
-  });
-
-  bot.callbackQuery("showtools:off", async (ctx) => {
-    gateway.showTools = false;
-    await ctx.answerCallbackQuery("❌ Disabled.");
-    const kb = new InlineKeyboard()
-      .text("On", "showtools:on")
-      .text("✅ Off", "showtools:off");
-    await ctx.editMessageReplyMarkup({ reply_markup: kb });
-  });
-
-  bot.command("showraw", async (ctx) => {
-    dbg(1, "/showraw");
-    const kb = new InlineKeyboard()
-      .text(gateway.rawMode ? "✅ Raw" : "Raw", "showraw:on")
-      .text(gateway.rawMode ? "MarkdownV2" : "✅ MarkdownV2", "showraw:off");
-    await ctx.reply("📄 Output format:", { reply_markup: kb });
-  });
-
-  bot.callbackQuery("showraw:on", async (ctx) => {
-    gateway.rawMode = true;
-    await ctx.answerCallbackQuery("📄 Raw mode. No formatting.");
-    const kb = new InlineKeyboard()
-      .text("✅ Raw", "showraw:on")
-      .text("MarkdownV2", "showraw:off");
-    await ctx.editMessageReplyMarkup({ reply_markup: kb });
-  });
-
-  bot.callbackQuery("showraw:off", async (ctx) => {
-    gateway.rawMode = false;
-    await ctx.answerCallbackQuery("📄 MarkdownV2 mode.");
-    const kb = new InlineKeyboard()
-      .text("Raw", "showraw:on")
-      .text("✅ MarkdownV2", "showraw:off");
-    await ctx.editMessageReplyMarkup({ reply_markup: kb });
-  });
-
   bot.command("name", async (ctx) => {
     dbg(1, "/name");
     const name = ctx.match?.trim();
@@ -978,9 +880,6 @@ if (import.meta.main) {
     { command: "session",    description: "Show session state (model, messages, thinking)" },
 
     { command: "last",      description: "Show last assistant response text" },
-    { command: "showthink", description: "Toggle thinking block visibility" },
-    { command: "showtools", description: "Toggle live tool call messages" },
-    { command: "showraw",  description: "Toggle raw/MarkdownV2 message formatting" },
     { command: "resume",    description: "Switch to a previous session" },
     { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "name",      description: "Set a display name for the current session" },

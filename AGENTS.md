@@ -15,7 +15,7 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 
 1. Telegram text/photo → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`.
 2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
-3. Pi streams `text_delta` + `thinking_delta` → relay accumulates, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced. `thinking_delta` is silently dropped when `showThinking` is off (filtered in `handlePiEvent`, not in relay).
+3. Pi streams `text_delta` + `thinking_delta` → relay accumulates, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced.
 4. On `agent_end` → final edit (or error placeholder if stream produced no content and Pi errored), tool summary, clear state, process next queued message.
 5. If pi busy → message queued FIFO (in-memory), user gets "Queued." reply.
 
@@ -31,11 +31,8 @@ Commands use loose coupling: the handler stores a per-command chatId field (`las
 |------------------|-------------|----------|
 | `/new` | `new_session` | cancels relay + resets state via `resetSession()` |
 | `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
-| `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping (raw mode sends plain) |
-| `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue, toggles |
-| `/showthink` | (none) | toggles `showThinking` via inline keyboard |
-| `/showtools` | (none) | toggles `showTools` via inline keyboard; when On, sends `<pre>` per tool call with truncated args |
-| `/showraw` | (none) | toggles `rawMode` (Raw / MarkdownV2) via inline keyboard; controls escaping + `parse_mode` |
+| `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping |
+| `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue |
 | `/resume` | (none; filesystem scan) | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |

@@ -53,12 +53,11 @@ export function createSafeEditor(
   chatId: number | string,
   firstMessageId: number,
   log?: (msg: string) => void,
-  rawMode?: boolean,
 ) {
   const messageIds: number[] = [firstMessageId];
   const lastGoodTexts: string[] = [""];
   let frozenLength = 0;
-  const mdOpts = rawMode ? undefined : ({ parse_mode: "MarkdownV2" as const });
+  const mdOpts = { parse_mode: "MarkdownV2" as const };
 
   function errMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
@@ -108,7 +107,7 @@ export function createSafeEditor(
     try {
       return await api.sendMessage(chatId, text, mdOpts);
     } catch (err) {
-      if (!rawMode && isParseError(err)) {
+      if (isParseError(err)) {
         return await api.sendMessage(chatId, text);
       }
       throw err;
