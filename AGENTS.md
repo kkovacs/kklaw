@@ -1,6 +1,6 @@
 # kklaw — Telegram ↔ Pi RPC Gateway
 
-A [bun](https://bun.com) project that bridges Telegram and the Pi coding agent using grammy and Pi's RPC mode.
+A bun project bridging Telegram and the Pi coding agent using grammy and Pi's RPC mode.
 
 ## Architecture
 
@@ -9,139 +9,95 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (Telegram API utilities, file download, safe editor), `sessions.ts` (session file scanning), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL), `inject.ts` (file-based prompt injection). Extracted for testability.
+Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API utils, file download, safe editor), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL), `sessions.ts` (session scanning), `inject.ts` (file-based prompt injection).
 
-### Pipeline
+## Pipeline
 
-1. Telegram user sends a text message, slash command, or photo
-2. grammy handler (`message:text` or `message:photo`) checks `TELEGRAM_ALLOWED_USER_ID`. Known slash commands are intercepted by `bot.command()` handlers; unknown ones pass through as regular prompts to Pi. Photos are downloaded via Telegram API, base64-encoded, and sent as `ImageContent` blocks in the RPC `prompt` command.
-3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt", "images": [...]}` to pi. While pi is working, a "typing..." indicator is sent to Telegram reactively (on each incoming Pi event, with 4s cooldown to avoid rate limits). Stops naturally when events stop arriving (~5s Telegram expiry).
-4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
-5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
-6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
+1. Telegram text/photo → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`.
+2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
+3. Pi streams `text_delta` + `thinking_delta` → relay accumulates, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced. `thinking_delta` is silently dropped when `showThinking` is off (filtered in `handlePiEvent`, not in relay).
+4. On `agent_end` → final edit (or error placeholder if stream produced no content and Pi errored), tool summary, clear state, process next queued message.
+5. If pi busy → message queued FIFO (in-memory), user gets "Queued." reply.
 
 ### File injection pipeline
 
-External cron/tool writes a file → `InjectWatcher.scan()` detects it → reads + deletes → `Gateway.injectPrompt(text, filename)` → same session pipeline as step 3 above. Responses stream to `currentChatId` (or fall back to `allowedUserId`).
+External tool writes a file to the inject dir → `InjectWatcher.scan()` detects, reads, deletes it → `Gateway.injectPrompt()` → same pipeline as step 2 above. Responses stream to `currentChatId` (or fall back to `allowedUserId`).
 
-#### Slash commands (Telegram → Pi RPC)
+## Slash commands
 
-Commands use a **loose coupling** pattern: the command handler stores `lastChatId`, fires the RPC command; the `handlePiEvent` response handler picks it up and posts to that chat. Single user, single connection, no promise plumbing.
+Commands use loose coupling: the handler stores a per-command chatId field (`lastChatId`, `bashRequestChatId`, `deleteRequestChatId`), fires the RPC; `handlePiEvent` response handler picks it up and posts to that chat. All commands (except `/start`) require auth via `bot.filter()`.
 
-| Telegram command | RPC command | Response handler |
-|------------------|-------------|------------------|
-| `/new` | `new_session` | logs response; also cancels relay + resets state via `resetSession()` |
-| `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` → two response messages, both `<pre>` HTML |
-| `/last` | `get_last_assistant_text` | `showLastMessage()` → sends last assistant text with MarkdownV2 escaping (via `formatForTelegram()`); raw mode sends plain |
-| `/status` | (none) | `showDaemonStatus()` → self-contained, no RPC: uptime, Pi connection/pid, streaming state, queue depth, toggle states |
-| `/showthink` | (none) | toggles `showThinking` via inline keyboard (Yes/No) |
-| `/showtools` | (none) | toggles `showTools` via inline keyboard (On/Off); when On, sends a `<pre>` HTML message per tool call with truncated `JSON.stringify(args)` |
-| `/showraw` | (none) | toggles `rawMode` via inline keyboard (Raw / MarkdownV2); controls escaping + `parse_mode` for streaming and `/last` |
-| `/resume` | (none; filesystem scan) | scans `~/.pi/agent/sessions/` for recent `.jsonl` session files, shows inline keyboard |
+| Telegram command | RPC command | Response |
+|------------------|-------------|----------|
+| `/new` | `new_session` | cancels relay + resets state via `resetSession()` |
+| `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
+| `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping (raw mode sends plain) |
+| `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue, toggles |
+| `/showthink` | (none) | toggles `showThinking` via inline keyboard |
+| `/showtools` | (none) | toggles `showTools` via inline keyboard; when On, sends `<pre>` per tool call with truncated args |
+| `/showraw` | (none) | toggles `rawMode` (Raw / MarkdownV2) via inline keyboard; controls escaping + `parse_mode` |
+| `/resume` | (none; filesystem scan) | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
-| `/model [filter]` | `get_available_models` | `/model` alone → lists all models in `<pre>` (provider/id, name, context, modalities as emoji, price). `/model text` → shows filtered inline keyboard; button click fires `set_model` RPC. Both modes handled by `showModels()`. Filter is case-insensitive on name + id. Uses `modelFilter` sentinel to decide list vs buttons on async response. Callback data: `model:provider/id` (split on first `/`). |
-| `/delete` | `get_state` → `unlink` → `new_session` | async: sends `get_state`, finds session file in `sessionPicker` by `sessionId`, deletes the `.jsonl` file via `fs.unlink`, calls `resetSession()` + `new_session`, replies "Session deleted. New session started." Falls back gracefully if session not found or file is missing. |
+| `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
+| `/delete` | `get_state` → unlink → `new_session` | looks up session file in `sessionPicker` by `sessionId`, deletes it, resets + new session |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
+| `!command` | `bash` | stores `bashRequestChatId`, runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler |
 
-### Key design decisions
+## Key design decisions
 
-- **Separated for testability**: `relay.ts` (pure debounce logic), `pi-client.ts` (I/O boundary), `index.ts` (`Gateway` class + wiring). Extracted only when testing became the goal.
-- **Testable core**: `Gateway` class accepts `TelegramApi` and `PiClient` as injectable deps. Tests use mock APIs, no real Telegram or pi needed.
-- **JSONL framer is custom**: Node's `readline` is incompatible (splits on `U+2028`/`U+2029` which are valid in JSON strings). Custom `\n`-only splitter with optional `\r` strip.
-- **Debounced streaming**: editing Telegram messages per-character would hit rate limits. Buffer accumulates deltas, `editMessageText` fires every 600ms, final edit on `agent_end`.
-- **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming Pi event that means work is happening (`text_delta`, `thinking_delta`, `tool_execution_start`, etc.), with a 4s cooldown. No `setInterval` — the indicator is driven by real events and naturally expires ~5s after Pi goes silent. Events like `response` and `agent_end` do not trigger it.
-- **Thinking via blockquote**: `thinking_delta` events are streamed alongside `text_delta`. The relay interleaves segments, wrapping thinking content in `> ` prefix (MarkdownV2 blockquote) with special characters escaped.
-- **Robust Telegram editing (`createSafeEditor`)**: sits between `relay.ts` and the Telegram API. Handles three error classes:
-  - `MESSAGE_TOO_LONG` (4000 char limit) → rolls back to the last known good text, then `sendMessage`s the remainder in ≤4000-char chunks. Earlier chunks are "frozen"; streaming continues on the newest chunk.
-  - Parse errors during streaming (`!isFinal`) → skipped silently; `lastGoodTexts` is not updated. The next debounced edit retries with more text, which may complete broken markdown.
-  - Parse errors on final (`isFinal=true`) → falls back to plain text (no `parse_mode`) on the last message so the user at least sees raw text.
-  - Blockquote continuation: if `MESSAGE_TOO_LONG` splits mid-line inside a `>` blockquote, the remainder is prepended with `> ` so the new message continues the blockquote. This works because `relay.ts` escapes `>` in text segments, so any line starting with `>` is guaranteed to be thinking.
-- **MarkdownV2 with dual escape**: the entire message is sent with `parse_mode: "MarkdownV2"`. Two escape levels:
-  - **Thinking**: strict escape (all reserved chars) → no accidental formatting inside `> ` blockquotes
-  - **Text**: relaxed escape (`*`, `_`, `` ` `` pass through) → Pi's `**bold**`, `*italic*`, `` `code` `` render
-  - Other reserved chars (`!`, `.`, `[`, `]`, `~`, etc.) are always escaped to prevent parse errors (400 Bad Request)
-- **Sequential processing**: pi handles one prompt at a time. Incoming messages while busy are queued FIFO.
-- **Pi restart on crash**: `exit` handler spawns a new pi process after 1s delay.
-- **Error bubbling**: Pi errors that produce no stream content are surfaced to the Telegram user by editing the placeholder message. Without this, the user sees a frozen `"..."` forever.
-- **Verbosity levels**:
-  - **No flag**: Pi errors always logged to stderr; nothing else.
-  - **`-v`**: events/states + terse error context (`stopReason=error`, `messages=3`, etc.).
-  - **`-vv`**: full JSON of every event (`[pi] event JSON: ...`) plus raw stdout lines (`pi stdout: ...`).
-- **`drop_pending_updates: true`**: avoids processing stale Telegram messages on restart.
-- **Command registration via `setMyCommands`**: on startup, clears any stale chat-scoped commands (e.g. from other bots sharing the same user), then registers global commands. Telegram precedence: chat-scope > default-scope — without cleanup, another bot's chat-scoped commands would hide kklaw's.
-- **grammy handler ordering matters**: `bot.on("message:text")` catches all text messages — including `/commands`. All `bot.command()` handlers **must** be registered before the catch-all `bot.on("message:text")`, or they'll never fire.
+- **Gateway class** accepts injectable `TelegramApi` and download/delete functions — testable with mocks.
+- **JSONL framer** is custom: Node's `readline` splits on `U+2028`/`U+2029` which are valid in JSON strings. Custom `\n`-only splitter with `\r` strip.
+- **Debounced streaming**: buffer accumulates deltas, `editMessageText` fires on a timer, final edit on `agent_end`.
+- **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end` don't trigger it.
+- **Thinking via blockquote**: `thinking_delta` events interleaved with `text_delta`. Relay wraps thinking in `> ` prefix (MarkdownV2 blockquote).
+- **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback). Blockquote continuation on split.
+- **Dual MarkdownV2 escape**: thinking gets strict escape (all reserved chars); text gets relaxed escape (`*` `_` `` ` `` pass through for Pi's formatting). Other reserved chars always escaped.
+- **Sequential processing**: Pi handles one prompt at a time. Queue is FIFO, in-memory.
+- **Pi restart on crash**: `exit`/`error` handler spawns a new pi process after 1s delay.
+- **Error bubbling**: Pi errors that produce no stream content surface to the Telegram user by editing the placeholder message.
+- **Verbosity**: `-v` = key events/states + error context, `-vv` = + `sendPi` raw + telegram msg JSON, `-vvv` = + full event JSON + raw stdout lines. Pi errors always logged to stderr regardless.
+- **drop_pending_updates: true** — avoids stale Telegram messages on restart.
+- **Command registration via `setMyCommands`** — clears stale chat-scoped commands on startup, registers global commands so they appear in `/` autocomplete.
+- **grammy handler ordering**: `bot.command()` handlers must be registered before `bot.on("message:text")` catch-all.
 
-### Known gaps (marked `XXX` in code)
+## Known gaps (marked `XXX` in code)
 
-- Extension UI dialogs (`select`, `confirm`, `input`, `editor`) not forwarded to user yet
-- Message queue is in-memory only — lost on gateway restart
+- Extension UI dialogs (`select`, `confirm`, `input`, `editor`) not forwarded to user
+- Message queue is in-memory — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
-- `/resume` shows only 8 most recent; no pagination
-- Photo media group debouncing not implemented — albums become N separate prompts, each with one photo
-- Photo download has no size limit check — large base64 images can bloat Pi context
-- Documents with `image/*` MIME types and stickers are not handled (only `message:photo`)
+- `/resume` shows limited results; no pagination
+- Photo media group debouncing not implemented
+- Photo download has no size limit check
+- Documents with `image/*` MIME types and stickers not handled (only `message:photo`)
 
-### Pi/provider gotcha
+## Pi/provider gotcha
 
-Pi stores assistant `thinking` blocks with `thinkingSignature: "reasoning"` in the session history. When sending the history to providers using the `openai-completions` API (e.g. `opencode-go` / `kimi-k2.6`), Pi includes those `reasoning` fields in the messages array. Some providers reject them as extra/unknown inputs, producing a `400 Error from provider: Extra inputs are not permitted, field: 'messages[N].reasoning'` and an empty assistant response. The gateway now surfaces this error to the user instead of leaving a frozen placeholder. A `/new` session clears the history and temporarily fixes it.
+Pi stores assistant `thinking` blocks with `thinkingSignature: "reasoning"` in session history. Providers using `openai-completions` API may reject those `reasoning` fields as extra inputs, producing `400 Error from provider`. The gateway surfaces this error to the user instead of leaving a frozen placeholder. A `/new` session clears the history as a workaround.
 
-### Pi skill expansion
+## Pi RPC types used
 
-Skills are triggered by prefixing a prompt with `/skill:name`. When Pi receives `{"type":"prompt", "message":"/skill:skill-name args"}`, it expands the skill server-side — loading the skill's `SKILL.md`, stripping YAML frontmatter, and wrapping the body in `<skill>` XML before appending user arguments. The LLM sees the expanded content, not the `/skill:` invocation. Available skills are discoverable via `{"type":"get_commands"}` RPC. See `pi/packages/coding-agent/docs/rpc.md` lines 68, 79, 103, 701-738 and `pi/packages/coding-agent/src/core/agent-session.ts:_expandSkillCommand()`.
-
-### Pi model RPC
-
-The `/model` command uses two Pi RPC calls:
-
-- **`get_available_models`** → `{ type: "get_available_models" }` → response: `{ command: "get_available_models", data: { models: Model[] } }`
-- **`set_model`** → `{ type: "set_model", provider: "...", modelId: "..." }` → response: `{ command: "set_model", data: Model }` (full Model object)
-
-**`Model` shape** (from `pi/packages/coding-agent/docs/rpc.md` lines 1210-1227):
-```typescript
-interface ModelInfo {
-  id: string;              // e.g. "claude-sonnet-4-20250514"
-  name: string;            // e.g. "Claude Sonnet 4"
-  provider: string;        // e.g. "anthropic"
-  api: string;             // e.g. "anthropic-messages"
-  contextWindow: number;   // e.g. 200000
-  maxTokens: number;       // e.g. 16384
-  input: string[];         // modalities: ["text", "image", "audio", "video"]
-  reasoning: boolean;      // thinking support
-  cost: { input: number; output: number; cacheRead?: number; cacheWrite?: number };  // USD per MTok
-  baseUrl: string;         // API endpoint (not displayed)
-}
 ```
-
-Displayed fields (in order): modalities as emoji (📝 text, 🏙️ image, 🎤 audio, 🎬 video), cost (`$in/$out` per MTok), context window (K/M). Missing fields show `?`.
-
-### Pi image RPC
-
-The `prompt`, `steer`, and `follow_up` RPC commands accept an optional `images` field — an array of `ImageContent` blocks:
-
-```typescript
-interface ImageContent {
-  type: "image";
-  data: string;   // base64-encoded file contents
-  mimeType: string; // e.g. "image/jpeg", "image/png"
-}
+prompt:   { type: "prompt", message: string, images?: ImageContent[] }
+bash:     { type: "bash", command: string }
+response: { type: "response", command?: string, success: bool, error?: string, data?: unknown }
+ImageContent: `{ type: "image", data: string (base64), mimeType: string }`
+ModelInfo (subset used): `{ id, name, provider, contextWindow, input[], cost: { input, output } }`
 ```
-
-Example RPC command: `{"type": "prompt", "message": "What's in this?", "images": [{"type": "image", "data": "base64...", "mimeType": "image/jpeg"}]}`. See `pi/packages/coding-agent/docs/rpc.md` lines 50-53. Only models advertising `"image"` in their `input` array will receive the images. Photos from Telegram are always `image/jpeg`. `handlePhotoMessage` preserves images through the queue (`QueuedMessage.images`), through `startPiSession`, and into the RPC command. `startPiSession` omits the `images` field when empty/undefined for backward compat.
 
 ## Configuration (`.env`)
 
-Bun auto-loads `.env` — no library needed.
+Bun auto-loads `.env` from the project root (the directory containing `package.json`), not from CWD.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `TELEGRAM_BOT_TOKEN` | grammy bot token | **required** (crash if missing) |
-| `TELEGRAM_ALLOWED_USER_ID` | single Telegram user ID to accept | — (empty = no one) |
+| `TELEGRAM_BOT_TOKEN` | grammy bot token | **required** |
+| `TELEGRAM_ALLOWED_USER_ID` | single Telegram user ID to accept | — |
 | `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
-| `PI_SESSION_DIR` | root dir to scan for session `.jsonl` files | `~/.pi/agent/sessions/` |
-| `TELEGRAM_INJECT_DIR` | directory watched for prompt files (polled every 12s) | `~/.pi/agent/injects/` |
+| `PI_SESSION_DIR` | root dir for session `.jsonl` scan | `~/.pi/agent/sessions/` |
+| `TELEGRAM_INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
 
-Extra Pi flags (provider, model, no-session, etc.) are passed on the command line after `--`:
+Extra Pi flags passed after `--`:
 
 ```bash
 bun run index.ts -- --provider opencode-go --model minimax-m2.5 --no-session
@@ -150,339 +106,7 @@ bun run index.ts -- --provider opencode-go --model minimax-m2.5 --no-session
 ## Commands
 
 ```bash
-bun install        # install dependencies (grammy)
+bun install        # install dependencies
 bun run index.ts   # start the gateway
 bun test           # run tests
 ```
-
-## File guide
-
-### `index.ts`
-
-**Config** — reads `TELEGRAM_BOT_TOKEN`, `PI_PATH`, `TELEGRAM_ALLOWED_USER_ID`, verbosity flags (`-v`, `-vv`). Additional Pi flags passed after `--` on command line.
-
-**`Gateway` class** — all mutable state + business logic:
-
-- `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, starts or enqueues a pi session. Unknown slash commands (not intercepted by `bot.command()`) pass through as regular prompts.
-- `handlePhotoMessage(ctx, api?)` — grammy `message:photo` handler. Picks largest photo by `file_size`, downloads via `downloadTelegramFile` (Telegram `getFile` + HTTP fetch), base64-encodes as `image/jpeg`. Uses `ctx.msg.caption` as prompt text (empty string if none). Auth check and queuing mirror `handleTextMessage`. On download failure, replies "Failed to download photo.".
-- `startPiSession(chatId, text, api?, images?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt","message":text,"images":[...]}` to pi. The `images` field is only included when non-empty.
-- `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
-  - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()`, `get_available_models` → `showModels()` when `lastChatId` is set. Also handles `/delete` flow when `deleteRequestChatId` is set: extracts `sessionId` from `get_state` response, looks up `SessionInfo.path` in `sessionPicker` (rescans only if not found), deletes the `.jsonl` file, then `resetSession()` + `new_session` + confirmation message.
-  - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
-  - `message_update` with `thinking_delta` → `relay.onDelta(delta, 'thinking')`
-  - `message_update` with `error` → logs to stderr immediately (always, even without `-v`)
-  - `message_end` with `stopReason === "error"` → captures `errorMessage` for later
-  - `tool_execution_start` → counts tool calls by `toolName` in `turnToolCounts` map (accumulated across all turns). If `showTools` is enabled, also formats and sends a `<pre>` HTML message with `JSON.stringify(args)` (truncated to 250 chars).
-  - `agent_end` → `await relay.onDone()`. Sends tool summary message (`"🔧 N tools used: bash ×3, read"`) if any tools were counted. If relay produced no content and an error was captured, edits the placeholder message with the error text. Then `processQueue()`.
-- `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
-- `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
-- `sendTyping(chatId)` — fires `sendChatAction("typing")` with 4s cooldown. Called reactively by `handlePiEvent` on events that mean Pi is working (not `response` or `agent_end`).
-- `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command and session switching.
-- `formatForTelegram(rawText)` — centralizes MarkdownV2 escaping + `parse_mode` for one-shot messages. Returns `{ text, other? }`. In raw mode: plain text, no `parse_mode`. In MarkdownV2 mode: `escapeText()` escaped text + `{ parse_mode: "MarkdownV2" }`. Used by `showLastMessage`; apply to any future one-shot text site.
-- `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking). Used by `/session` command.
-- `showStats(chatId, data)` — formats `get_session_stats` response into `<pre>` HTML (messages, tools, tokens with K/M abbreviation, cost). Used by `/session` command.
-- `showDaemonStatus(chatId)` — self-contained: formats daemon health into `<pre>` HTML (uptime, Pi status/pid, streaming state, queue depth, toggle states). Used by `/status` command. Reads `startedAt` field for uptime calculation.
-- `showLastMessage(chatId, data)` — sends `get_last_assistant_text` response via `formatForTelegram()`. Falls back to `"(No assistant messages yet.)"` when text is null.
-- `showModels(chatId, data)` — formats `get_available_models` response. Two modes governed by `modelFilter` sentinel:
-  - `modelFilter` unset → full list as `<pre>` HTML: `provider/id — Name` on first line, indented second line: `📝🏙️  $in/$out  200K` (modalities, price, context). If the list exceeds the Telegram message limit (~3900 chars), automatically splits into multiple `<pre>` messages. Filters case-insensitively on name and id.
-  - `modelFilter` set → buttons with `model:provider/id` callback data, filtered case-insensitively on name and id. Clears `modelFilter` after handling. Sends `"No models matching..."` or `"No models available."` as appropriate.
-- `startedAt: Date` — set in constructor; used by `showDaemonStatus()` for uptime display.
-- `lastChatId` — stores the chat to reply to when a command's RPC response arrives.
-- `currentChatId` / `currentPlaceholderMessageId` — tracks the active session's Telegram message so Pi errors can be bubbled back to the user.
-- `lastPiError` — captures `errorMessage` from `message_end` or `agent_end` events when `stopReason === "error"`.
-- `lastTypingSent: number` — timestamp of last `sendChatAction` for cooldown.
-- `turnToolCounts: Map<toolName, count>` — accumulates tool calls via `tool_execution_start` events during an agent run. Cleared at `agent_end` (after sending summary) and `resetSession()`.
-- `showTools: boolean` — toggled by `/showtools` command; when true, each `tool_execution_start` sends a live `<pre>` HTML message with truncated args.
-- `deleteRequestChatId: number | string` — set by `/delete` command; triggers session deletion + reset in the `get_state` response handler. Cleared after handling.
-- `deleteFile: (path: string) => Promise<void>` — injected file deletion function (defaults to `fs.promises.unlink`). Testable via mock.
-- `downloadFile: (fileId: string) => Promise<Buffer>` — injected file download function (defaults to `downloadTelegramFile(api, botToken, fileId)`). Testable via mock — same pattern as `deleteFile`. Used by `handlePhotoMessage`.
-- `botToken: string` — Telegram bot token, used for file download URL construction. Set from constructor options.
-- `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()`, `/delete` handler, and `resume:` callback.
-- `modelFilter?: string` — sentinel for `/model` async response: if set, `showModels()` renders filtered buttons instead of full `<pre>` list. Set by `/model <filter>` handler, cleared by `showModels()` after use.
-- `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
-- `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
-
-**Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, registers bot commands with Telegram via `bot.api.setMyCommands()` (so they appear in the `/` autocomplete menu), starts long polling. Not executed when imported for tests.
-
-### `telegram.ts`
-
-Telegram-specific utilities and interfaces.
-
-**Interfaces:**
-- `TelegramApi` — abstract Telegram API surface: `sendMessage`, `editMessageText`, `sendChatAction`, `getFile`. Used by `Gateway` and `createSafeEditor` for testability (mock API in tests).
-- `MessageContext` — grammy `message:text` shape: `chatId`, `from`, `msg.text`, `reply`.
-- `PhotoMessageContext` + `PhotoSize` — grammy `message:photo` shape: `chatId`, `from`, `msg.photo[]` (with `file_id`, `file_size`), `msg.caption`, `reply`.
-
-**Functions:**
-- `downloadTelegramFile(api, botToken, fileId)` — resolves `file_path` via `api.getFile()`, fetches from `https://api.telegram.org/file/bot<token>/<path>`, returns `Buffer`. Throws on missing `file_path` or HTTP error.
-- `createSafeEditor(api, chatId, firstMessageId, log?, rawMode?)` — wrapped by `Gateway.startPiSession`, handles streaming edits with MESSAGE_TOO_LONG splitting, parse-error fallback, and blockquote continuation.
-- `splitTelegramText(text, maxLen?)` — line/word-aware text splitting for Telegram's message length limit.
-- `htmlEscape(s)` — escapes `&`, `<`, `>` for HTML `parse_mode`.
-- `formatToolCall(args, toolName)` — formats tool call as `<pre>` HTML with truncated JSON args.
-
-### `relay.ts`
-
-**`createRelay({ edit, debounceMs?, rawMode?, log? })` → `{ onDelta, onDone, cancel }`**
-
-Pure function. Holds `segments`, `currentKind`, `currentText` and `editTimer` in closure.
-- `onDelta(text, kind?)` — appends to current segment. On kind change (`'text'` ↔ `'thinking'`), pushes current to `segments[]` and starts a new one. Schedules debounced `edit()` call (default 600ms).
-- `onDone()` — cancels timer, finalizes last segment, builds output string. Thinking segments: `> ` prefix per line. Escaping depends on `rawMode`: if false (default, MarkdownV2), thinking gets strict escape (`escapeMdV2`) and text gets relaxed escape (`escapeText`, lets `*` `_` `` ` `` through); if true (raw), no escaping applied, `> ` prefix only. Calls `edit(text, true)`. Returns `Promise<boolean>`: `true` if content was edited, `false` if buffer was empty. Clears all state.
-- `cancel()` — clears timer and all segments/buffer without a final edit. Used by `resetSession()` before `/new`.
-
-Also exports `escapeText(s: string): string` — relaxed MarkdownV2 escape that preserves `*`, `_`, `` ` ``. Used by `Gateway.formatForTelegram()` for `/last` and future one-shot messages.
-
-### `pi-client.ts`
-
-**`createPiClient({ path, args, env, onEvent, onLine?, onStderr?, onExit?, onError? })` → `PiClient`**
-
-Spawns subprocess with `stdio: ['pipe','pipe','pipe']`. Reads stdout via custom `\n`-only JSONL framer (`attachJsonlReader`). Returns `{ pid, send(cmd), close() }`.
-- `onLine` — called with every raw stdout line (used for `-vv` logging)
-- `onEvent` — called with parsed JSON object
-- `onExit` / `onError` — called on subprocess exit or spawn error
-
-### `sessions.ts`
-
-Session file scanning for the `/resume` command. Called by `Gateway.scanRecentSessions()` in `index.ts`.
-
-- `SessionInfo` — `{ path, id, created, name?, mtime }` for each discovered session.
-- `formatSessionDate(iso)` → `"YYYY-MM-DD HH:MM"` for button labels.
-- `scanSessions(sessionDir, limit)` — walks `sessionDir` recursively for `.jsonl` files, validates session header (`type: "session"`, UUIDv7 id), reads `timestamp`, scans for latest `session_info` entry (display name). Sorts by file mtime descending, returns top N.
-- Internal: `collectJsonlFiles(dir)` (recursive walk), `readSessionInfo(path)` (header + name extraction).
-
-**Pi session file format:**
-- Default dir: `~/.pi/agent/sessions/<encoded-cwd>/` (cwd with `/:\` → `-`, wrapped in `--...--`)
-- Filename: `<iso-ts>_<uuidv7>.jsonl` (e.g. `2025-05-15T10-30-45-123Z_018f4a2c-....jsonl`)
-- First line (header): `{"type":"session","version":3,"id":"<uuidv7>","timestamp":"<iso>","cwd":"<path>"}`
-- Name stored as: `{"type":"session_info",...,"name":"My Session"}` — appended anywhere in file, latest one wins
-- `set_session_name` RPC rejects empty strings; clearing a name requires extension-level access (not yet wired)
-
-### `inject.ts`
-
-File-based prompt injection. Watches a directory for prompt files created by external tools (Unix cron, `at`, etc.). When a file appears, reads its content, deletes the file, then injects the prompt into the current Pi session — same pipeline as a Telegram message.
-
-**`InjectWatcher` class** — `new InjectWatcher(dir, onPrompt)`
-- `start()` — ensures directory exists (`mkdir -p`), performs initial scan (processes straggler files from before startup), then polls via `setInterval`.
-- `stop()` — clears the interval.
-- `scan()` — reads all files in `dir`. For each: read content, delete file, then call `onPrompt(text, filename)`. Empty files are deleted silently. Read/unlink failures are logged and the file is left for the next scan cycle.
-- No internal tracking (`seen` set was removed) — file deletion IS the deduplication mechanism. A cron job that writes to the same filename each time works because each new file is a fresh inode.
-
-**Usage:** external tool writes a text file to the inject directory:
-```bash
-echo "review open PRs" > ~/.pi/agent/injects/review
-# or atomic pattern:
-echo "review open PRs" > /tmp/inj && mv /tmp/inj ~/.pi/agent/injects/review
-```
-
-**`Gateway.injectPrompt(text, filename)`** — routes the injected prompt into the session pipeline:
-- If `currentChatId` is set (session active) → uses that chat for the response.
-- Otherwise falls back to `allowedUserId` (works for private chats where userId == chatId).
-- If Pi is busy → queued (same as a user message). If idle → starts a new session.
-
-### `tests/`
-
-| File | Purpose |
-|------|---------|
-| `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `showModels` (full list, filtered buttons, no-match, empty, modality emoji mapping, missing fields), `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`/`get_available_models`; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **photo handling** (auth rejection, largest photo pick by file_size, download failure reply, caption+image in RPC command, empty-message when no caption, queuing with images, processQueue with images, startPiSession images inclusion/omission); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
-| `inject.test.ts` | Two-file processing, empty-file skip + delete, missing-directory creation, unreadable-file survival |
-| `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
-| `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
-
-## Data flow
-
-```
-Telegram message
-  → Gateway.handleTextMessage()
-    → [auth check]
-    → [if busy] queue.push() + ctx.reply("Queued.")
-    → [if idle] Gateway.startPiSession()
-      → api.sendMessage("...")
-      → createSafeEditor(api, chatId, messageId)
-        → createRelay({ edit: (buf, isFinal) => editor.edit(buf, isFinal) })
-      → sendPi({ type: "prompt", message: text })
-
-Telegram photo
-  → Gateway.handlePhotoMessage()
-    → [auth check]
-    → [pick largest photo by file_size from ctx.msg.photo[]]
-    → [downloadFile(file_id) → Buffer → base64 → ImageContent]
-    → [if download error] ctx.reply("Failed to download photo.")
-    → [if busy] queue.push({ chatId, text: caption, images }) + ctx.reply("Queued.")
-    → [if idle] Gateway.startPiSession(chatId, caption, api, images)
-      → ... (same streaming relay as text)
-      → sendPi({ type: "prompt", message: caption, images: [{ type: "image", data: base64, mimeType: "image/jpeg" }] })
-
-Telegram command (e.g. /resume)
-  → bot.command("resume", handler)
-    → gateway.scanRecentSessions() → calls sessions.scanSessions(sessionDir, 8)
-      → walks ~/.pi/agent/sessions/ recursively for .jsonl files
-      → validates session header, extracts id/timestamp/name
-      → sorts by file mtime, populates gateway.sessionPicker map
-    → builds InlineKeyboard: one button per session (label: "2026-04-12 15:40 - fix-auth-bug" or "... - <last12-chars-of-uuid>")
-      → callback_data: "resume:<uuid>" (fits in 64-byte limit)
-    → ctx.reply("Resume a session:", { reply_markup: kb })
-
-Telegram command (e.g. /delete)
-  → bot.command("delete", handler)
-    → gateway.deleteRequestChatId = ctx.chatId
-    → sendPi({ type: "get_state" })
-    → ctx.reply("Deleting session...")
-  ... (loose coupling: response arrives later)
-  → Gateway.handlePiEvent()
-    → [response, command="get_state", deleteRequestChatId !== 0]
-      → extract sessionId from resp.data
-      → lookup in sessionPicker (rescan only if missing)
-      → if found: unlink(sessionInfo.path)
-      → resetSession() + sendPi({ type: "new_session" })
-      → api.sendMessage(chatId, "Session deleted. New session started.")
-      → clear deleteRequestChatId
-
-Telegram callback (e.g. resume button clicked)
-  → bot.callbackQuery(/^resume:(.+)$/, handler)  ← regex captures uuid
-    → gateway.switchToSession(sessionId)
-      → looks up path in sessionPicker
-      → resetSession() (cancel relay, clear queue)
-      → sendPi({ type: "switch_session", sessionPath: path })
-    → ctx.answerCallbackQuery("Switched.")
-    → ctx.editMessageText("Resumed session: 2026-04-12 15:40 - fix-auth-bug")
-
-Telegram command (e.g. /name)
-  → bot.command("name", handler)
-    → parses ctx.match (text after /name)
-    → if empty: ctx.reply("Usage: /name <name>")
-    → sendPi({ type: "set_session_name", name })
-    → ctx.reply("Named.")
-
-Telegram command (e.g. /model)
-  → bot.command("model", handler)
-    → [auth check]
-    → parses ctx.match (optional filter text)
-    → gateway.modelFilter = filter || undefined
-    → gateway.lastChatId = ctx.chatId
-    → sendPi({ type: "get_available_models" })
-  ... (loose coupling: response arrives later)
-  → Gateway.handlePiEvent()
-    → [response, command="get_available_models"] → showModels(lastChatId, data)
-      → if modelFilter: filter models (case-insensitive on name+id), build inline_keyboard buttons (callback_data: "model:provider/id"), send via api.sendMessage with reply_markup
-      → if no modelFilter: format all models as <pre> HTML list (provider/id — Name, context window, modality emoji, $in/$out cost), send via api.sendMessage({ parse_mode: "HTML" })
-      → clear modelFilter
-
-Telegram callback (e.g. model button clicked)
-  → bot.callbackQuery(/^model:(.+)$/, handler)  ← regex captures "provider/modelId"
-    → parses provider and modelId (split on first "/")
-    → sendPi({ type: "set_model", provider, modelId })
-    → ctx.answerCallbackQuery("✅ Switched to provider/modelId.")
-    → ctx.editMessageText("✅ Model: provider/modelId")
-
-Telegram command (e.g. /showraw)
-  → bot.command("showraw", handler)
-    → shows inline keyboard: Raw / MarkdownV2 with current state checked
-  → bot.callbackQuery("showraw:on") → gateway.rawMode = true (next session: no escaping, plain text)
-  → bot.callbackQuery("showraw:off") → gateway.rawMode = false (default: full MarkdownV2 escaping)
-
-Telegram command (e.g. /session)
-  → bot.command("session", handler)
-    → [auth check]
-    → gateway.lastChatId = ctx.chatId
-    → sendPi({ type: "get_state" })
-    → sendPi({ type: "get_session_stats" })
-  ... (loose coupling: two responses arrive)
-  → Gateway.handlePiEvent()
-    → [response, command="get_state"] → showStatus(lastChatId, data)
-      → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
-    → [response, command="get_session_stats"] → showStats(lastChatId, data)
-      → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
-
-Telegram command (e.g. /status)
-  → bot.command("status", handler)
-    → [auth check]
-    → gateway.showDaemonStatus(ctx.chatId)
-      → formats uptime from Date.now() - startedAt, Pi connection/pid, streaming state, queue depth, toggles
-      → api.sendMessage(chatId, "<pre>...</pre>", { parse_mode: "HTML" })
-
-Telegram command (e.g. /quit)
-  → bot.command("quit", handler)
-    → [auth check]
-    → ctx.reply("Bye!")
-    → process.exit(0)
-
-pi stdout
-  → createPiClient attachJsonlReader
-    → JSON.parse(line)
-    → Gateway.handlePiEvent()
-      → [any event except response, agent_end] → sendTyping(chatId) (4s cooldown)
-      → [response] → log success/error; route get_state, get_session_stats, get_last_assistant_text, get_available_models
-      → [text_delta] → relay.onDelta(delta, 'text')
-      → [thinking_delta] → relay.onDelta(delta, 'thinking')
-        → [debounce 600ms] → createSafeEditor.edit(buf)
-          → [OK] → api.editMessageText(lastMsg, buf, { parse_mode: "MarkdownV2" })
-          → [too long] → rollback + api.sendMessage(chunks, { parse_mode: "MarkdownV2" })
-          → [parse error, streaming] → skip, retry later
-      → [tool_execution_start] → gateway.turnToolCounts.set(name, (count ?? 0) + 1)
-        → [if showTools && currentChatId] → api.sendMessage(formatToolCall(args, name), { parse_mode: "HTML" })
-      → [agent_end] → await relay.onDone() → boolean hadContent
-        → [hadContent=true] → createSafeEditor.edit(final, isFinal=true)
-          → [OK] → api.editMessageText(lastMsg, final, { parse_mode: "MarkdownV2" })
-          → [parse error, final] → api.editMessageText(lastMsg, final) // plain text
-        → [hadContent=false && lastPiError] → api.editMessageText(placeholder, `Error: ${lastPiError}`)
-        → [turnToolCounts.size > 0] → api.sendMessage("🔧 N tools used: ...") + clear map
-        → Gateway.processQueue()
-          → [if queued] Gateway.startPiSession(next)
-
-Inject file
-  → InjectWatcher.scan()
-    → readdir + readFile for each file
-    → unlink (delete) before callback
-    → Gateway.injectPrompt(text, filename)
-      → same pipeline as Telegram message above
-```
-
-## Testing guidelines
-
-**What to test**
-- **Gateway orchestration** (`gateway.test.ts`) — auth, queueing, session lifecycle, `agent_end` → process queue.
-- **Pure logic** (`relay.test.ts`) — debounce, accumulation, flush. Use fake timers, no real `setTimeout` delays.
-- **File watcher** (`inject.test.ts`) — real I/O with temp dirs: multi-file processing, empty-file skip+delete, missing-dir creation.
-- **Integration via fixtures** — replay recorded pi JSONL responses through `Gateway` and assert final text matches `extractTextDeltas()`.
-
-**What NOT to test**
-- grammy library (assumed perfect)
-- pi binary / RPC protocol (assumed perfect)
-- Actual network calls or subprocess spawning
-
-**How to add a new fixture**
-1. Run the gateway with `-vv`: `bun run index.ts -vv 2>/tmp/log`
-2. Send the real Telegram message(s) you want to capture
-3. Extract pi stdout lines: `grep '^pi stdout:' /tmp/log | sed 's/^pi stdout: //' > tests/fixtures/name.jsonl`
-4. For text prompts: add an integration test using `loadFixtureLines('name.jsonl')` and `extractTextDeltas()`
-5. For command responses (e.g. `get_state`, `get_session_stats`): replay through `handlePiEvent` with `lastChatId` set, capture `sendMessage` calls
-
-**Test conventions**
-- One concern per file (`relay.test.ts`, `gateway.test.ts`).
-- Use `bun:test` — no extra test framework.
-- Mock `TelegramApi` with plain objects (`sendMessage`, `editMessageText`).
-- Mock `MessageContext` with plain objects (`chatId`, `from`, `msg`, `reply`).
-- Helpers in `tests/helpers.ts`: `loadFixtureLines()`, `extractTextDeltas()`.
-
-## Documentation references
-
-- Pi RPC protocol: https://pi.dev/docs/latest/rpc
-- Pi custom providers: https://pi.dev/docs/latest/custom-provider
-- grammy basics: https://grammy.dev/guide/basics
-- grammy context: https://grammy.dev/guide/context
-- grammy Bot API: https://grammy.dev/guide/api
-- grammy parse-mode plugin (reference): https://grammy.dev/plugins/parse-mode
-- grammy MarkdownV2: https://core.telegram.org/bots/api#markdownv2-style
-- Bun docs: https://bun.sh/docs
-
-## Guidelines for working with the User:
-
-- User comes from a C and bash programming background, so prefers clean, minimalist solutions and small, precise code changes.
-- Simple is beautiful. Every bit of complexity that is added needs to justify its existence.
-- Things that belong together should be **kept close together** in the codebase: same file when possible, or at least similar directory, filename, function name, field name, etc. - When parts have been separated for any reason, they should carry comments stating what calls/uses them, so the flow is clear for future reference.
-- **Premature** abstractions are the **root of all evil**, but consolidation is preferable to writing the same code over and over.
-- First we **plan** together. Afer we have a plan we agree on, User will say "*go hot*" and then you can execute **only the steps agreed on**.
-- User likes to progress in small steps. **Don't rush ahead**, don't start creating anything that was not asked for, only **suggest** what you would do next.
-- Don't update the tests **before** the functionality we are working on has been confirmed working by User. It's wasteful and confusing in case further changes are needed.
-- Technical debt, temporary solutions, unhandled errors are OK in WIP, but **must** be marked with `XXX` comments.
-- **Do not** do any `git` operations without User's explicit request.
