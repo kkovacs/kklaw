@@ -675,36 +675,6 @@ describe("Gateway.handlePiEvent", () => {
   });
 });
 
-describe("Gateway /new command", () => {
-  it("resets session and sends new_session without cwd when no directory given", () => {
-    const piCommands: object[] = [];
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    gateway.resetSession();
-    gateway.sendPi({ type: "new_session" });
-
-    expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue).toEqual([]);
-    expect(gateway.currentRelay).toBeNull();
-    expect(piCommands).toEqual([{ type: "new_session" }]);
-  });
-
-  it("resets session and sends new_session with cwd when directory is given", () => {
-    const piCommands: object[] = [];
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    gateway.resetSession();
-    gateway.sendPi({ type: "new_session", cwd: "/home/user/myproject" });
-
-    expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue).toEqual([]);
-    expect(gateway.currentRelay).toBeNull();
-    expect(piCommands).toEqual([{ type: "new_session", cwd: "/home/user/myproject" }]);
-  });
-});
-
 describe("Integration: replay recorded fixture", () => {
   it("replays hello-robot.jsonl and produces expected final text", async () => {
     const lines = loadFixtureLines("hello-robot.jsonl");

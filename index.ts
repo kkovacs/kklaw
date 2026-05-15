@@ -726,10 +726,9 @@ if (import.meta.main) {
 
   bot.command("new", async (ctx) => {
     if (ctx.from?.id !== allowedUserId) return;
-    const dir = ctx.match?.trim();
     gateway.resetSession();
-    gateway.sendPi({ type: "new_session", ...(dir ? { cwd: dir } : {}) });
-    await ctx.reply(dir ? `🆕 New session in ${dir}.` : "🆕 New session.");
+    gateway.sendPi({ type: "new_session" });
+    await ctx.reply("🆕 New session.");
   });
 
   bot.command("status", async (ctx) => {

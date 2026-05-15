@@ -15,7 +15,7 @@ kklaw:
 - [x] Add emoji to system messages. This is the post-AI age, everything comes with emojis 🙄
 - [x] Cron-driven injection of prompts into current session, like the uncommitted change we created in `telepi/`
 - [x] Ability to send bash commands with `!ls -l` - use Pi's correct RPC command.
-- [ ] Pass down images from Telegram messages to Pi for models to "see".
+- [x] Pass down images from Telegram messages to Pi for models to "see".
 - [ ] `/tree` and `/undo` command
 - [ ] `/btw` command that executes ONE `agent_start`/`agent_end` in a (new?) Pi process with `--no-session` (temporary, forgets everything at `agent_end`)
 

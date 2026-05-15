@@ -1,5 +1,7 @@
 # kklaw
 
+> There are many personal agents, but this one is mine. 😀
+
 To install dependencies:
 
 ```bash

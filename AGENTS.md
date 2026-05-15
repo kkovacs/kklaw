@@ -9,13 +9,13 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Five files: `index.ts` (bot wiring + `Gateway` + `createSafeEditor`), `sessions.ts` (session file scanning), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL), `inject.ts` (file-based prompt injection). Extracted for testability.
+Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (Telegram API utilities, file download, safe editor), `sessions.ts` (session file scanning), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL), `inject.ts` (file-based prompt injection). Extracted for testability.
 
 ### Pipeline
 
-1. Telegram user sends a text message or slash command
-2. grammy `message:text` handler checks `TELEGRAM_ALLOWED_USER_ID`. Known slash commands are intercepted by `bot.command()` handlers; unknown ones (e.g. `/some-custom-command`) pass through as regular prompts to Pi.
-3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt"}` to pi. While pi is working, a "typing..." indicator is sent to Telegram reactively (on each incoming Pi event, with 4s cooldown to avoid rate limits). Stops naturally when events stop arriving (~5s Telegram expiry).
+1. Telegram user sends a text message, slash command, or photo
+2. grammy handler (`message:text` or `message:photo`) checks `TELEGRAM_ALLOWED_USER_ID`. Known slash commands are intercepted by `bot.command()` handlers; unknown ones pass through as regular prompts to Pi. Photos are downloaded via Telegram API, base64-encoded, and sent as `ImageContent` blocks in the RPC `prompt` command.
+3. If pi is idle → spawn placeholder `"..."` message, send `{"type":"prompt", "images": [...]}` to pi. While pi is working, a "typing..." indicator is sent to Telegram reactively (on each incoming Pi event, with 4s cooldown to avoid rate limits). Stops naturally when events stop arriving (~5s Telegram expiry).
 4. pi streams `message_update` events (`text_delta` + `thinking_delta`) → relay accumulates segments, thinking wrapped in `> ` blockquote (MarkdownV2) → `createSafeEditor.edit()` debounced at 600ms
 5. On `agent_end` → final relay edit (or error placeholder), send `"🔧 N tools used: bash ×3, read"` summary if any `tool_execution_start` events were counted during the run, clear state, process next queued message. **If the stream produced no content and Pi reported an error, the placeholder is edited to `Error: <message>` so the user is not left with a frozen "...".**
 6. If pi is busy → message goes to an in-memory queue, user gets "Queued." reply
@@ -77,6 +77,9 @@ Commands use a **loose coupling** pattern: the command handler stores `lastChatI
 - Message queue is in-memory only — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
 - `/resume` shows only 8 most recent; no pagination
+- Photo media group debouncing not implemented — albums become N separate prompts, each with one photo
+- Photo download has no size limit check — large base64 images can bloat Pi context
+- Documents with `image/*` MIME types and stickers are not handled (only `message:photo`)
 
 ### Pi/provider gotcha
 
@@ -110,6 +113,20 @@ interface ModelInfo {
 ```
 
 Displayed fields (in order): modalities as emoji (📝 text, 🏙️ image, 🎤 audio, 🎬 video), cost (`$in/$out` per MTok), context window (K/M). Missing fields show `?`.
+
+### Pi image RPC
+
+The `prompt`, `steer`, and `follow_up` RPC commands accept an optional `images` field — an array of `ImageContent` blocks:
+
+```typescript
+interface ImageContent {
+  type: "image";
+  data: string;   // base64-encoded file contents
+  mimeType: string; // e.g. "image/jpeg", "image/png"
+}
+```
+
+Example RPC command: `{"type": "prompt", "message": "What's in this?", "images": [{"type": "image", "data": "base64...", "mimeType": "image/jpeg"}]}`. See `pi/packages/coding-agent/docs/rpc.md` lines 50-53. Only models advertising `"image"` in their `input` array will receive the images. Photos from Telegram are always `image/jpeg`. `handlePhotoMessage` preserves images through the queue (`QueuedMessage.images`), through `startPiSession`, and into the RPC command. `startPiSession` omits the `images` field when empty/undefined for backward compat.
 
 ## Configuration (`.env`)
 
@@ -147,7 +164,8 @@ bun test           # run tests
 **`Gateway` class** — all mutable state + business logic:
 
 - `handleTextMessage(ctx, api?)` — grammy `message:text` handler logic. Checks `allowedUserId`, starts or enqueues a pi session. Unknown slash commands (not intercepted by `bot.command()`) pass through as regular prompts.
-- `startPiSession(chatId, text, api?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt",...}` to pi.
+- `handlePhotoMessage(ctx, api?)` — grammy `message:photo` handler. Picks largest photo by `file_size`, downloads via `downloadTelegramFile` (Telegram `getFile` + HTTP fetch), base64-encodes as `image/jpeg`. Uses `ctx.msg.caption` as prompt text (empty string if none). Auth check and queuing mirror `handleTextMessage`. On download failure, replies "Failed to download photo.".
+- `startPiSession(chatId, text, api?, images?)` — sets `piStreaming = true`, sends "..." placeholder, creates a `createSafeEditor` + `Relay`, sends `{"type":"prompt","message":text,"images":[...]}` to pi. The `images` field is only included when non-empty.
 - `handlePiEvent(event)` — routes pi events (now `async` so it can `await relay.onDone()` before deciding whether to bubble an error):
   - `response` — log success/error; routes `get_state` → `showStatus()`, `get_session_stats` → `showStats()`, `get_last_assistant_text` → `showLastMessage()`, `get_available_models` → `showModels()` when `lastChatId` is set. Also handles `/delete` flow when `deleteRequestChatId` is set: extracts `sessionId` from `get_state` response, looks up `SessionInfo.path` in `sessionPicker` (rescans only if not found), deletes the `.jsonl` file, then `resetSession()` + `new_session` + confirmation message.
   - `message_update` with `text_delta` → `relay.onDelta(delta, 'text')`
@@ -159,8 +177,6 @@ bun test           # run tests
 - `processQueue(api?)` — if pi idle, dequeues next message and calls `startPiSession`.
 - `sendPi(cmd)` — JSON-stringifies and sends to `piClient`.
 - `sendTyping(chatId)` — fires `sendChatAction("typing")` with 4s cooldown. Called reactively by `handlePiEvent` on events that mean Pi is working (not `response` or `agent_end`).
-- `formatToolCall(args, toolName)` — exported pure function. Returns `<pre>🔧 name: {"key":"val"}</pre>` with HTML-escaped, 250-c truncated `JSON.stringify(args)`. Handles missing/falsy args gracefully.
-- `htmlEscape(s)` — escapes `&`, `<`, `>` for HTML `parse_mode` messages.
 - `resetSession()` — cancels relay, clears queue, resets `piStreaming`. Used by `/new` command and session switching.
 - `formatForTelegram(rawText)` — centralizes MarkdownV2 escaping + `parse_mode` for one-shot messages. Returns `{ text, other? }`. In raw mode: plain text, no `parse_mode`. In MarkdownV2 mode: `escapeText()` escaped text + `{ parse_mode: "MarkdownV2" }`. Used by `showLastMessage`; apply to any future one-shot text site.
 - `showStatus(chatId, data)` — formats `get_state` response into `<pre>` HTML (Model, Session, Messages, Thinking). Used by `/session` command.
@@ -179,12 +195,30 @@ bun test           # run tests
 - `showTools: boolean` — toggled by `/showtools` command; when true, each `tool_execution_start` sends a live `<pre>` HTML message with truncated args.
 - `deleteRequestChatId: number | string` — set by `/delete` command; triggers session deletion + reset in the `get_state` response handler. Cleared after handling.
 - `deleteFile: (path: string) => Promise<void>` — injected file deletion function (defaults to `fs.promises.unlink`). Testable via mock.
+- `downloadFile: (fileId: string) => Promise<Buffer>` — injected file download function (defaults to `downloadTelegramFile(api, botToken, fileId)`). Testable via mock — same pattern as `deleteFile`. Used by `handlePhotoMessage`.
+- `botToken: string` — Telegram bot token, used for file download URL construction. Set from constructor options.
 - `sessionPicker: Map<sessionId, SessionInfo>` — populated by `scanRecentSessions()`; consumed by `switchToSession()`, `/delete` handler, and `resume:` callback.
 - `modelFilter?: string` — sentinel for `/model` async response: if set, `showModels()` renders filtered buttons instead of full `<pre>` list. Set by `/model <filter>` handler, cleared by `showModels()` after use.
 - `scanRecentSessions(limit?, sessionDir?)` — calls `scanSessions()` from `sessions.ts`, populates `sessionPicker` map, returns list.
 - `switchToSession(sessionId)` — looks up path in `sessionPicker`, calls `resetSession()` + sends `switch_session` RPC.
 
 **Start block** (`if (import.meta.main)`) — creates `Bot`, instantiates `Gateway`, wires `createPiClient`, registers grammy handlers, registers bot commands with Telegram via `bot.api.setMyCommands()` (so they appear in the `/` autocomplete menu), starts long polling. Not executed when imported for tests.
+
+### `telegram.ts`
+
+Telegram-specific utilities and interfaces.
+
+**Interfaces:**
+- `TelegramApi` — abstract Telegram API surface: `sendMessage`, `editMessageText`, `sendChatAction`, `getFile`. Used by `Gateway` and `createSafeEditor` for testability (mock API in tests).
+- `MessageContext` — grammy `message:text` shape: `chatId`, `from`, `msg.text`, `reply`.
+- `PhotoMessageContext` + `PhotoSize` — grammy `message:photo` shape: `chatId`, `from`, `msg.photo[]` (with `file_id`, `file_size`), `msg.caption`, `reply`.
+
+**Functions:**
+- `downloadTelegramFile(api, botToken, fileId)` — resolves `file_path` via `api.getFile()`, fetches from `https://api.telegram.org/file/bot<token>/<path>`, returns `Buffer`. Throws on missing `file_path` or HTTP error.
+- `createSafeEditor(api, chatId, firstMessageId, log?, rawMode?)` — wrapped by `Gateway.startPiSession`, handles streaming edits with MESSAGE_TOO_LONG splitting, parse-error fallback, and blockquote continuation.
+- `splitTelegramText(text, maxLen?)` — line/word-aware text splitting for Telegram's message length limit.
+- `htmlEscape(s)` — escapes `&`, `<`, `>` for HTML `parse_mode`.
+- `formatToolCall(args, toolName)` — formats tool call as `<pre>` HTML with truncated JSON args.
 
 ### `relay.ts`
 
@@ -249,7 +283,7 @@ echo "review open PRs" > /tmp/inj && mv /tmp/inj ~/.pi/agent/injects/review
 | File | Purpose |
 |------|---------|
 | `relay.test.ts` | Debounce, accumulation, flush, empty buffer, log callback, thinking `> ` prefix, MarkdownV2 escaping, text/thinking interleave, multiple thinking blocks |
-| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `showModels` (full list, filtered buttons, no-match, empty, modality emoji mapping, missing fields), `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`/`get_available_models`; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
+| `gateway.test.ts` | Auth rejection, session start, queue when busy, `/` ignore, queue processing, `agent_end` → process queue, `thinking_delta` routing, fixture replay integration; command tests: `resetSession`, `showStatus`, `showStats`, `showDaemonStatus`, `showLastMessage`, `showModels` (full list, filtered buttons, no-match, empty, modality emoji mapping, missing fields), `handlePiEvent` routing for `get_state`/`get_session_stats`/`get_last_assistant_text`/`get_available_models`; **Pi error bubbling when stream produces no content**; **tool call accumulation** (single turn, multi-turn, no-tools, clear on agent_end, clear on resetSession); **typing indicator** (cooldown, reactive on work events, excluded on response/agent_end, no-op when idle); **formatToolCall** (HTML wrapping, truncation, escaping); **showTools** (sends message when on, skips when off or idle, still counts tools); **/delete** (delete session file + reset + new_session on get_state response, graceful fallback when session not in picker or no sessionId in data, does not trigger on non-get_state responses, proceeds even if unlink throws ENOENT); **photo handling** (auth rejection, largest photo pick by file_size, download failure reply, caption+image in RPC command, empty-message when no caption, queuing with images, processQueue with images, startPiSession images inclusion/omission); **session scanning tests** (`scanRecentSessions`: sort/filter/name extraction/empty dir), **session switching tests** (`switchToSession` RPC send), **/resume then /last integration test** |
 | `inject.test.ts` | Two-file processing, empty-file skip + delete, missing-directory creation, unreadable-file survival |
 | `helpers.ts` | `loadFixtureLines`, `extractTextDeltas` (mirrors relay's dual escape — strict for thinking, relaxed for text) |
 | `fixtures/` | Recorded pi JSONL responses + Telegram messages from real runs. `get-state.jsonl`, `get-session-stats.jsonl`, `get-last-assistant-text.jsonl` for command integration tests |
@@ -266,6 +300,17 @@ Telegram message
       → createSafeEditor(api, chatId, messageId)
         → createRelay({ edit: (buf, isFinal) => editor.edit(buf, isFinal) })
       → sendPi({ type: "prompt", message: text })
+
+Telegram photo
+  → Gateway.handlePhotoMessage()
+    → [auth check]
+    → [pick largest photo by file_size from ctx.msg.photo[]]
+    → [downloadFile(file_id) → Buffer → base64 → ImageContent]
+    → [if download error] ctx.reply("Failed to download photo.")
+    → [if busy] queue.push({ chatId, text: caption, images }) + ctx.reply("Queued.")
+    → [if idle] Gateway.startPiSession(chatId, caption, api, images)
+      → ... (same streaming relay as text)
+      → sendPi({ type: "prompt", message: caption, images: [{ type: "image", data: base64, mimeType: "image/jpeg" }] })
 
 Telegram command (e.g. /resume)
   → bot.command("resume", handler)
@@ -383,6 +428,13 @@ pi stdout
         → [turnToolCounts.size > 0] → api.sendMessage("🔧 N tools used: ...") + clear map
         → Gateway.processQueue()
           → [if queued] Gateway.startPiSession(next)
+
+Inject file
+  → InjectWatcher.scan()
+    → readdir + readFile for each file
+    → unlink (delete) before callback
+    → Gateway.injectPrompt(text, filename)
+      → same pipeline as Telegram message above
 ```
 
 ## Testing guidelines
@@ -390,6 +442,7 @@ pi stdout
 **What to test**
 - **Gateway orchestration** (`gateway.test.ts`) — auth, queueing, session lifecycle, `agent_end` → process queue.
 - **Pure logic** (`relay.test.ts`) — debounce, accumulation, flush. Use fake timers, no real `setTimeout` delays.
+- **File watcher** (`inject.test.ts`) — real I/O with temp dirs: multi-file processing, empty-file skip+delete, missing-dir creation.
 - **Integration via fixtures** — replay recorded pi JSONL responses through `Gateway` and assert final text matches `extractTextDeltas()`.
 
 **What NOT to test**
