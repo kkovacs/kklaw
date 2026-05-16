@@ -115,7 +115,7 @@ Every argument after the `--` is passed through to the Pi process that gets star
 bun run index.ts -vvv -- --continue
 ```
 
-To auto-start `kklaw` at boot, you can also use `cron`:
+To auto-start `kklaw` at boot, you can also use `cron`. Runs in a loop with 5 sec throttle, so to restart just send it `/quit`:
 
 ```
 @reboot tmux new-session -d -s kklaw 'cd ~/workspace/; while true; do ( set -a ; . .env ; set +a ; bun run ~/kklaw/index.ts -v -- --continue ; sleep 5 ); done'
