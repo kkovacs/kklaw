@@ -651,7 +651,6 @@ export class Gateway {
         await ctx.reply("Usage: !&lt;command&gt;", { parse_mode: "HTML" });
         return;
       }
-      this.lastChatId = ctx.chatId;
       this.sendPi({ type: "bash", command });
       return;
     }
@@ -832,7 +831,6 @@ if (import.meta.main) {
   bot.command("new", async (ctx) => {
     dbg(1, "/new");
     gateway.resetSession("/new");
-    gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "new_session" });
     gateway.sendPi({ type: "get_state" });
     await ctx.reply("🆕 New session.");
@@ -845,14 +843,12 @@ if (import.meta.main) {
 
   bot.command("session", async (ctx) => {
     dbg(1, "/session");
-    gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_state" });
     gateway.sendPi({ type: "get_session_stats" });
   });
 
   bot.command("last", async (ctx) => {
     dbg(1, "/last");
-    gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_last_assistant_text" });
   });
 
@@ -870,7 +866,6 @@ if (import.meta.main) {
 
   bot.command("delete", async (ctx) => {
     dbg(1, "/delete");
-    gateway.lastChatId = ctx.chatId;
 
     const sessionId = gateway.currentSessionId;
     if (sessionId) {
@@ -934,7 +929,6 @@ if (import.meta.main) {
     }
 
     gateway.switchToSession(sessionId);
-    gateway.lastChatId = ctx.chatId!;
     gateway.sendPi({ type: "get_state" });
     await ctx.answerCallbackQuery("✅ Switched.");
 
@@ -956,7 +950,6 @@ if (import.meta.main) {
     dbg(1, "/model");
     const filter = ctx.match?.trim();
     gateway.modelFilter = filter || undefined;
-    gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "get_available_models" });
   });
 
