@@ -61,7 +61,7 @@ For example, juggling multiple sessions:
 
 ```
 ── Session "evil plan" ──
- Agent: So, do you want me to execute our evil plan?
+ Agent: So, should I execute our evil plan?
   User: /new                       ← start a fresh session, shelving this one
 ── Session "new" (unnamed) ──
   User: By the way, what's 300 feet to km?
@@ -72,9 +72,11 @@ For example, juggling multiple sessions:
   User: /resume                    ← pick "evil plan" from the inline menu
 ── Session "evil plan" (resumed) ──
   User: Yes, proceed with the evil plan.
+ Agent: Aye aye, sir! 🫡
   User: /resume                    ← pick "groceries" from the inline menu
 ── Session "groceries" (resumed) ──
   User: Also, add 2 kgs of garlic to the list.
+ Agent: As you wish, my love. 💕
 ```
 
 ## INSTALL
