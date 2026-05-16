@@ -114,16 +114,16 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 
 | Telegram command | RPC command | Response |
 |------------------|-------------|----------|
-| `/new` | `new_session` → `get_state` | cancels relay + resets state; shows new session status |
+| `/new` | `new_session` → (response handler) `get_state` | cancels relay + resets state; shows new session status |
 | `/abort` | `abort` | cancels relay, clears streaming state, empties queue; replies "🛑 Aborted." |
 | `/abort_bash` | `abort_bash` | replies "🛑 Bash aborted." |
 | `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping |
 | `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue |
-| `/resume` | (none; filesystem scan) | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC → `get_state` to show new session status |
+| `/resume` | (none; filesystem scan) → button → `switch_session` → (response handler) `get_state` | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC → `get_state` to show new session status |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
-| `/delete` | `new_session` → `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
+| `/delete` | `new_session` → (response handler) `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
 | `!command` | `bash` | runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler — routed to `lastChatId` |
 

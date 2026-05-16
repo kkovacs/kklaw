@@ -1205,6 +1205,54 @@ describe("Gateway.handlePiEvent command routing", () => {
     expect(called).toBe(false);
   });
 
+  it("chains new_session response to get_state RPC when pi is connected", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.piClient = {
+      pid: 1,
+      send(cmd) { piCommands.push(cmd); },
+      close() {},
+    };
+
+    await gateway.handlePiEvent({
+      type: "response", command: "new_session", success: true,
+    });
+
+    expect(piCommands.length).toBe(1);
+    expect(piCommands[0]).toEqual({ type: "get_state" });
+    expect(called).toBe(false);
+  });
+
+  it("chains switch_session response to get_state RPC when pi is connected", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.piClient = {
+      pid: 1,
+      send(cmd) { piCommands.push(cmd); },
+      close() {},
+    };
+
+    await gateway.handlePiEvent({
+      type: "response", command: "switch_session", success: true,
+    });
+
+    expect(piCommands.length).toBe(1);
+    expect(piCommands[0]).toEqual({ type: "get_state" });
+    expect(called).toBe(false);
+  });
+
   it("routes get_available_models response to showModels when lastChatId is set", async () => {
     const messages: { text: string }[] = [];
     const api: TelegramApi = {

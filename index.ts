@@ -177,6 +177,12 @@ export class Gateway {
         console.error(`[pi] error (${resp.command}): ${resp.error}`);
       } else {
         dbg(1, `pi response ok: ${resp.command}`);
+        if (resp.command === "new_session") {
+          this.sendPi({ type: "get_state" });
+        }
+        if (resp.command === "switch_session") {
+          this.sendPi({ type: "get_state" });
+        }
         if (resp.command === "get_state" && this.lastChatId) {
           const data = resp.data as { sessionId?: string } | undefined;
           if (data?.sessionId) this.currentSessionId = data.sessionId;
@@ -832,7 +838,6 @@ if (import.meta.main) {
     dbg(1, "/new");
     gateway.resetSession("/new");
     gateway.sendPi({ type: "new_session" });
-    gateway.sendPi({ type: "get_state" });
     await ctx.reply("🆕 New session.");
   });
 
@@ -909,7 +914,6 @@ if (import.meta.main) {
 
     gateway.resetSession("/delete");
     gateway.sendPi({ type: "new_session" });
-    gateway.sendPi({ type: "get_state" });
     await ctx.reply("🗑️ Session deleted. 🆕 New session started.");
   });
 
@@ -946,7 +950,6 @@ if (import.meta.main) {
     }
 
     gateway.switchToSession(sessionId);
-    gateway.sendPi({ type: "get_state" });
     await ctx.answerCallbackQuery("✅ Switched.");
 
     const label = info.name
