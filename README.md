@@ -36,7 +36,7 @@ No extra features. Just you and the filesystem.
 `*/15 * * * * echo "Please do HEARTBEAT.md" > ~/.pi/agent/injects/heartbeat.txt`
 
 # Example: Wake the LLM only on actual incoming email in daytime
-*/5 8-20 * * * fdm fetch | grep -qv "0 messages" && cho "New email, please process!" > ~/.pi/agent/injects/emails.txt
+*/5 8-20 * * * fdm fetch | grep -qv "0 messages" && echo "Read emails!" > ~/.pi/agent/injects/emails.txt
 ```
 
 If you have `apt install at` (how could they ere remove `at` from the default install? I'm sure it's systemd's fault somehow):
