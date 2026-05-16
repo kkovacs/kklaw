@@ -53,6 +53,7 @@ Reminder for tomorrow morning:
 - Review PR #42
 - Prep for 10am client call
 - Push timesheet
+- Start doomsday machine
 MSG
 END
 ```
