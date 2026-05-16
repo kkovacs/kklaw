@@ -18,9 +18,91 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 3. Pi's `message_start` (assistant role) → creates a new Telegram placeholder message + per-message `Relay`. `message_update`/`text_delta` → current relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
 4. `message_end` → finalizes current relay. If no content produced (tool-call-only message), the placeholder is deleted. If an error arrived with no content, the placeholder is edited to show the error.
 5. On `agent_end` → safety-net finalization of any remaining relay, error surfacing fallback (guarded by `piErrorSent` flag), tool summary, clear state, process next queued message.
-6. If pi busy → message queued FIFO (in-memory), user gets "Queued." reply.
+6. If pi busy → message queued FIFO (in-memory), `👀` reaction added to the message via `ctx.react()`.
 
-### File injection pipeline
+### Telegram allowed reaction emoji
+
+`ctx.react()` uses `setMessageReaction` which only supports a fixed set of emoji (custom emoji require a premium subscription). The full list is defined in `@grammyjs/types` (`node_modules/@grammyjs/types/message.d.ts`, `ReactionTypeEmoji.emoji` union type).
+
+| Emoji | Name |
+|-------|------|
+| 👍 | +1 |
+| 👎 | -1 |
+| ❤ | heart |
+| 🔥 | fire |
+| 🥰 | smiling with hearts |
+| 👏 | clap |
+| 😁 | grin |
+| 🤔 | thinking |
+| 🤯 | exploding head |
+| 😱 | scream |
+| 🤬 | cursing |
+| 😢 | crying |
+| 🎉 | party |
+| 🤩 | star-struck |
+| 🤮 | vomiting |
+| 💩 | poop |
+| 🙏 | pray |
+| 👌 | ok |
+| 🕊 | dove |
+| 🤡 | clown |
+| 🥱 | yawn |
+| 🥴 | woozy |
+| 😍 | heart eyes |
+| 🐳 | whale |
+| ❤‍🔥 | heart on fire |
+| 🌚 | new moon face |
+| 🌭 | hot dog |
+| 💯 | 100 |
+| 🤣 | rofl |
+| ⚡ | lightning |
+| 🍌 | banana |
+| 🏆 | trophy |
+| 💔 | broken heart |
+| 🤨 | raised eyebrow |
+| 😐 | neutral |
+| 🍓 | strawberry |
+| 🍾 | champagne |
+| 💋 | kiss |
+| 🖕 | middle finger |
+| 😈 | smiling devil |
+| 😴 | sleeping |
+| 😭 | sobbing |
+| 🤓 | nerd |
+| 👻 | ghost |
+| 👨‍💻 | technologist |
+| 👀 | eyes |
+| 🎃 | pumpkin |
+| 🙈 | see-no-evil |
+| 😇 | angel |
+| 😨 | fearful |
+| 🤝 | handshake |
+| ✍ | writing |
+| 🤗 | hugging |
+| 🫡 | salute |
+| 🎅 | santa |
+| 🎄 | christmas tree |
+| ☃ | snowman |
+| 💅 | nail polish |
+| 🤪 | zany |
+| 🗿 | moai |
+| 🆒 | cool |
+| 💘 | heart with arrow |
+| 🙉 | hear-no-evil |
+| 🦄 | unicorn |
+| 😘 | blowing kiss |
+| 💊 | pill |
+| 🙊 | speak-no-evil |
+| 😎 | sunglasses |
+| 👾 | alien |
+| 🤷‍♂ | man shrug |
+| 🤷 | shrug |
+| 🤷‍♀ | woman shrug |
+| 😡 | pouting |
+
+Source: `node_modules/@grammyjs/types/message.d.ts` — `ReactionTypeEmoji.emoji` union type. This is the upstream source of truth; it mirrors [Telegram Bot API's `ReactionTypeEmoji`](https://core.telegram.org/bots/api#reactiontypeemoji). If a `REACTION_INVALID` error occurs, check this list against the current version of `@grammyjs/types`.
+
+
 
 External tool writes a file to the inject dir → `InjectWatcher.scan()` detects, reads, deletes it → `Gateway.injectPrompt()` → same pipeline as step 2 above. Responses stream to `currentChatId` (or fall back to `allowedUserId`).
 

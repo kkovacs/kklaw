@@ -23,6 +23,7 @@ function mockContext(overrides: Partial<MessageContext> = {}): MessageContext {
     from: { id: 8476228873 },
     msg: { text: "hello pi" },
     reply: async () => {},
+    react: async () => {},
     ...overrides,
   };
 }
@@ -39,6 +40,7 @@ function mockPhotoContext(overrides: Partial<PhotoMessageContext> = {}): PhotoMe
       ],
     },
     reply: async () => {},
+    react: async () => {},
     ...overrides,
   };
 }
@@ -56,6 +58,7 @@ function mockDocumentContext(overrides: Partial<DocumentMessageContext> = {}): D
       },
     },
     reply: async () => {},
+    react: async () => {},
     ...overrides,
   };
 }
@@ -86,20 +89,20 @@ describe("Gateway.handleTextMessage", () => {
     expect(gateway.queue.length).toBe(0);
   });
 
-  it("queues message and replies 'Queued.' when pi is busy", async () => {
+  it("queues message and reacts with hourglass when pi is busy", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true; // simulate busy
 
     const ctx = mockContext({ msg: { text: "second msg" } });
-    const replies: string[] = [];
-    ctx.reply = async (text: string) => { replies.push(text); };
+    const reactions: string[] = [];
+    ctx.react = async (emoji: string) => { reactions.push(emoji); };
 
     await gateway.handleTextMessage(ctx, api);
 
     expect(gateway.queue.length).toBe(1);
     expect(gateway.queue[0]!.text).toBe("second msg");
-    expect(replies).toEqual(["⏳ Queued."]);
+    expect(reactions).toEqual(["👀"]);
   });
 
   it("passes unknown slash commands to Pi as prompts", async () => {
@@ -1627,9 +1630,9 @@ describe("Gateway.handlePhotoMessage", () => {
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     gateway.downloadFile = async () => Buffer.from("busy-img");
-    const replies: string[] = [];
+    const reactions: string[] = [];
     const ctx = mockPhotoContext();
-    ctx.reply = async (text) => { replies.push(text); };
+    ctx.react = async (emoji) => { reactions.push(emoji); };
 
     await gateway.handlePhotoMessage(ctx, api);
 
@@ -1640,7 +1643,7 @@ describe("Gateway.handlePhotoMessage", () => {
       data: Buffer.from("busy-img").toString("base64"),
       mimeType: "image/jpeg",
     }]);
-    expect(replies).toEqual(["⏳ Queued."]);
+    expect(reactions).toEqual(["👀"]);
   });
 
   it("processQueue dequeues message with images and starts session", async () => {
@@ -1838,9 +1841,9 @@ describe("Gateway.handleDocumentMessage", () => {
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     gateway.downloadFile = async () => Buffer.from("busy-doc");
-    const replies: string[] = [];
+    const reactions: string[] = [];
     const ctx = mockDocumentContext();
-    ctx.reply = async (text) => { replies.push(text); };
+    ctx.react = async (emoji) => { reactions.push(emoji); };
 
     await gateway.handleDocumentMessage(ctx, api);
 
@@ -1851,6 +1854,6 @@ describe("Gateway.handleDocumentMessage", () => {
       data: Buffer.from("busy-doc").toString("base64"),
       mimeType: "image/png",
     }]);
-    expect(replies).toEqual(["⏳ Queued."]);
+    expect(reactions).toEqual(["👀"]);
   });
 });

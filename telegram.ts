@@ -29,6 +29,7 @@ export interface MessageContext {
   from?: { id: number };
   msg: { text?: string };
   reply(text: string): Promise<unknown>;
+  react(emoji: string): Promise<unknown>;
 }
 
 export interface PhotoSize {
@@ -47,6 +48,7 @@ export interface PhotoMessageContext {
     photo: PhotoSize[];
   };
   reply(text: string): Promise<unknown>;
+  react(emoji: string): Promise<unknown>;
 }
 
 export interface DocumentMessageContext {
@@ -61,6 +63,7 @@ export interface DocumentMessageContext {
     };
   };
   reply(text: string): Promise<unknown>;
+  react(emoji: string): Promise<unknown>;
 }
 
 export function createSafeEditor(

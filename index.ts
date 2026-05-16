@@ -663,7 +663,7 @@ export class Gateway {
     if (this.piStreaming) {
       dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
       this.queue.push({ chatId: ctx.chatId, text });
-      await ctx.reply("⏳ Queued.");
+      await ctx.react("👀");
       return;
     }
 
@@ -708,7 +708,7 @@ export class Gateway {
     if (this.piStreaming) {
       dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
       this.queue.push({ chatId: ctx.chatId, text, images });
-      await ctx.reply("⏳ Queued.");
+      await ctx.react("👀");
       return;
     }
 
@@ -750,7 +750,7 @@ export class Gateway {
     if (this.piStreaming) {
       dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
       this.queue.push({ chatId: ctx.chatId, text, images });
-      await ctx.reply("⏳ Queued.");
+      await ctx.react("👀");
       return;
     }
 
@@ -933,7 +933,7 @@ if (import.meta.main) {
   });
 
   bot.on("message:text", async (ctx) => {
-    await gateway.handleTextMessage(ctx, ctx.api);
+    await gateway.handleTextMessage(ctx as unknown as MessageContext, ctx.api);
   });
 
   bot.on("message:photo", async (ctx) => {
