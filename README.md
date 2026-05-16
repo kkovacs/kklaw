@@ -158,4 +158,4 @@ Pi extensions (**can't** switch sessions):
 
 Gateway-style (**can** switch sessions):
 
-- https://github.com/benedict2310/TelePi - Benedict's gateway, very similar to mine _(he came first)_, not as minimalist. Voice, screenshots, handoff! Try it!
+- https://github.com/benedict2310/TelePi - Benedict's gateway, similar to mine _(he came first)_, better name, more features: Voice, screenshots, handoff! Try it!
