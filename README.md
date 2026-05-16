@@ -50,7 +50,7 @@ git clone https://github.com/kkovacs/kklaw
 cd kklaw
 
 # 4. Install deps and configure
-cp .env.example .env   # Set TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID and an LLM for Pi
+cp .env.example .env   # Set TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID and an LLM
 bun install
 
 # 5/a. Either run kklaw with bun:
@@ -61,10 +61,10 @@ bun build ./index.ts --compile --minify --bytecode --outfile kklaw
 ./kklaw
 ```
 
-Every argument after `--` is passed through to the Pi process that gets started, for example, to always continue the previous session:
+Every argument after the `--` is passed through to the Pi process that gets started. For example, to start kklaw in extra-verbose mode, and always continue the previous session:
 
 ```bash
-bun run index.ts -v -- -c
+bun run index.ts -vvv -- --continue
 ```
 
 ## Configuration (`.env`)
@@ -86,28 +86,28 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | Command | What it does |
 |---------|--------------|
 | `/new` | Start a fresh session |
-| `/session` | Show current session status and stats |
-| `/last` | Show last assistant message |
-| `/status` | Show daemon uptime, Pi pid, streaming state, queue |
 | `/resume` | Browse and switch to a past session |
+| `/last` | Show last assistant message (useful after `/resume`) |
 | `/name <name>` | Name the current session |
-| `/model [filter]` | List available models, or filter + pick one |
 | `/delete` | Delete the current session and start fresh |
+| `/model [filter]` | List all available LLMs, or filter + pick one |
+| `/status` | Show kklaw uptime, Pi pid, streaming state, queue |
+| `/session` | Show Pi session status and stats |
 | `/quit` | Stop the gateway |
 
-All other slash commands are passed down to Pi.
+All other slash commands are passed down to Pi. All errors are passed up to you on Telegram.
 
-Send a file (text, photo, or document) and it will passed to your LLM, and optionally saved. (That way you can ask your LLM to operate on it, even if it does not understand the file directly.)
+Send any photo or file and it will be passed down to the LLM, and also saved (if `MEDIA_UPLOAD_PATH` is set. That way you can ask your LLM to operate on the file, even if it does not understand the file directly.)
 
-Prefix with `!` to run a shell command instead — e.g. `!ls -l ~/.pi/agent/uploads/`.
+Prefix with `!` to run a shell command — e.g. `!ls -l ~/.pi/agent/uploads/`. Your LLM sees the output on the next turn.
 
 ## Other amazing projects similar to this one (that I tried)
 
 Pi extensions (**can't** switch sessions):
 
 - https://github.com/badlogic/pi-telegram - Mario's (author of Pi) original extension
-- https://github.com/llblab/pi-telegram - The maintained version of the above
+- https://github.com/llblab/pi-telegram - Maintained version of the above
 
 Gateway-style (**can** switch sessions):
 
-- https://github.com/benedict2310/TelePi - Benedict's gateway, very similar to mine _(he came first)_, not as minimalist. Voice, screenshots, handoff!
+- https://github.com/benedict2310/TelePi - Benedict's gateway, very similar to mine _(he came first)_, not as minimalist. Voice, screenshots, handoff! Try it!
