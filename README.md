@@ -130,12 +130,12 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `TELEGRAM_BOT_TOKEN` | grammy bot token | **required** |
-| `TELEGRAM_ALLOWED_USER_ID` | single Telegram user ID to accept | — |
-| `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
+| `TELEGRAM_ALLOWED_USER_ID` | single Telegram user ID to accept | **required** |
+| `..._API_KEY` | any [provider key](https://pi.dev/docs/latest/providers) works | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
-| `PI_SESSION_DIR` | root dir for session `.jsonl` scan | `~/.pi/agent/sessions/` |
 | `INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
-| `MEDIA_UPLOAD_PATH` | directory to save incoming photos/documents | — (disabled if unset) |
+| `UPLOAD_DIR` | directory to save incoming photos/documents | — (disabled if unset) |
+| `PI_SESSION_DIR` | root dir for session `.jsonl` scan | `~/.pi/agent/sessions/` |
 
 ## Slash commands
 
@@ -155,7 +155,7 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 
 All other slash commands are passed down to Pi. All errors are passed up to you on Telegram.
 
-Send any photo or file and it will be passed down to the LLM, and also saved (if `MEDIA_UPLOAD_PATH` is set. That way you can ask your LLM to operate on the file, even if it does not understand the file directly.)
+Send any photo or file and it will be passed down to the LLM, and also saved (if `UPLOAD_DIR` is set. That way you can ask your LLM to operate on the file, even if it does not understand the file directly.)
 
 Prefix with `!` to run a shell command — e.g. `!ls -l ~/.pi/agent/uploads/`. Your LLM sees the output on the next turn.
 

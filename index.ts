@@ -16,7 +16,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 const SESSION_DIR = (process.env.PI_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions")).replace(/^~/, homedir());
 const INJECT_DIR = (process.env.INJECT_DIR ?? join(homedir(), ".pi", "agent", "injects")).replace(/^~/, homedir());
-const UPLOAD_PATH = (process.env.MEDIA_UPLOAD_PATH ?? "").replace(/^~/, homedir()) || null;
+const UPLOAD_DIR = (process.env.UPLOAD_DIR ?? "").replace(/^~/, homedir()) || null;
 
 // Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
@@ -141,10 +141,10 @@ export class Gateway {
   }
 
   async saveUpload(buffer: Buffer, mimeType: string, filename?: string): Promise<string | null> {
-    if (!UPLOAD_PATH) return null;
+    if (!UPLOAD_DIR) return null;
     const ext = extFromMime(mimeType);
     const name = filename ?? `${Date.now()}${ext}`;
-    const target = join(UPLOAD_PATH, name);
+    const target = join(UPLOAD_DIR, name);
     try {
       await writeFile(target, buffer);
       return name;
@@ -759,9 +759,9 @@ export class Gateway {
     let text = caption;
     if (isImage) {
       images = [{ type: "image", data: buffer.toString("base64"), mimeType: doc.mime_type }];
-    } else if (UPLOAD_PATH) {
+    } else if (UPLOAD_DIR) {
       const name = doc.file_name ?? `${Date.now()}${extFromMime(doc.mime_type ?? "application/octet-stream")}`;
-      const path = join(UPLOAD_PATH, name);
+      const path = join(UPLOAD_DIR, name);
       const suffix = `\n\n[Uploaded file: ${path}]`;
       text = caption ? caption + suffix : suffix.trim();
     }
@@ -1033,9 +1033,9 @@ if (import.meta.main) {
   });
 
 
-  if (UPLOAD_PATH) {
-    await mkdir(UPLOAD_PATH, { recursive: true });
-    dbg(1, `upload dir ensured: ${UPLOAD_PATH}`);
+  if (UPLOAD_DIR) {
+    await mkdir(UPLOAD_DIR, { recursive: true });
+    dbg(1, `upload dir ensured: ${UPLOAD_DIR}`);
   }
 
   spawnPi();
