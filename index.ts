@@ -15,7 +15,7 @@ import { InjectWatcher } from "./inject";
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 const SESSION_DIR = (process.env.PI_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions")).replace(/^~/, homedir());
-const INJECT_DIR = (process.env.TELEGRAM_INJECT_DIR ?? join(homedir(), ".pi", "agent", "injects")).replace(/^~/, homedir());
+const INJECT_DIR = (process.env.INJECT_DIR ?? join(homedir(), ".pi", "agent", "injects")).replace(/^~/, homedir());
 const UPLOAD_PATH = (process.env.MEDIA_UPLOAD_PATH ?? "").replace(/^~/, homedir()) || null;
 
 // Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines

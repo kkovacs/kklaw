@@ -14,7 +14,7 @@ You also get to run bash commands from Telegram like `!rm -rf /` 😅
 
 ## Inject / automation
 
-There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever you already have. `kklaw` watches an **inject directory** (`TELEGRAM_INJECT_DIR`). Any script can drop a text file into that directory, and `kklaw` will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
+There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever you already have. `kklaw` watches an **inject directory** (`INJECT_DIR`). Any script can drop a text file into that directory, and `kklaw` will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
 
 This is the hook for automation. Some ideas:
 
@@ -126,7 +126,7 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
 | `PI_SESSION_DIR` | root dir for session `.jsonl` scan | `~/.pi/agent/sessions/` |
-| `TELEGRAM_INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
+| `INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
 | `MEDIA_UPLOAD_PATH` | directory to save incoming photos/documents | — (disabled if unset) |
 
 ## Slash commands

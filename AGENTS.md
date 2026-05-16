@@ -182,7 +182,7 @@ Bun auto-loads `.env` from the project root (the directory containing `package.j
 | `OPENCODE_API_KEY` | passed to pi subprocess via inherited env | — |
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
 | `PI_SESSION_DIR` | root dir for session `.jsonl` scan | `~/.pi/agent/sessions/` |
-| `TELEGRAM_INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
+| `INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
 | `MEDIA_UPLOAD_PATH` | directory to save incoming photos/documents | — (disabled if unset) |
 
 Extra Pi flags passed after `--`:
