@@ -115,6 +115,12 @@ Every argument after the `--` is passed through to the Pi process that gets star
 bun run index.ts -vvv -- --continue
 ```
 
+To auto-start `kklaw` at boot, you can also use `cron`:
+
+```
+@reboot tmux new-session -d -s kklaw 'cd ~/workspace/; while true; do ( set -a ; . .env ; set +a ; bun run ~/kklaw/index.ts -v -- --continue ; sleep 5 ); done'
+```
+
 ## Configuration (`.env`)
 
 Bun auto-loads `.env` from the project root (where `package.json` is), not from CWD.
