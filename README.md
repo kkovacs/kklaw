@@ -39,7 +39,7 @@ No extra features. Just you and the filesystem.
 */5 8-20 * * * fetchmail && echo "Read the emails!" > ~/.pi/agent/injects/emails.txt
 ```
 
-If you have `apt install at` (how could they ere remove `at` from the default install? I'm sure it's systemd's fault somehow):
+If you have `apt install at` (how could they ever remove `at` from the default install? I'm sure it's `systemd`'s fault somehow):
 
 ```bash
 at now + 10 minutes <<EOF
