@@ -149,6 +149,8 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `/model [filter]` | List all available LLMs, or filter + pick one |
 | `/status` | Show `kklaw` uptime, Pi pid, streaming state, queue |
 | `/session` | Show Pi session status and stats |
+| `/abort` | Abort the current agent turn (including tools) |
+| `/abort_bash` | Abort a running `!` bash command |
 | `/quit` | Stop the gateway |
 
 All other slash commands are passed down to Pi. All errors are passed up to you on Telegram.
