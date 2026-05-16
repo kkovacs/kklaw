@@ -19,9 +19,10 @@ There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever y
 This is the hook for automation. Some ideas:
 
 - **Simulate HEARTBEAT** — in the _main session_ so you can ask the LLM about it _(I'm looking at you, Hermes)_
-- **Scheduled wake-ups** — tell your LLM about unix `at` and `kklaw` inject, and tell it to "do something in 45 minutes"
+- **Scheduled wake-ups** — Skill your LLM with `at` and `kklaw` inject, and tell it to "do this in 45 minutes"
 - **Email triage** — run `fdm` to fetch mail, and wake the LLM _only_ if there was any
 - **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
+- **Log watcher** — with a `tail`, a `grep` and a redirect, you can wake your agent when something happens
 - **Webhooks** — make a tiny script that writes the webhook payload to the inject directory
 - **Your own Moltbook** — Run two or more `kklaw`s that write into each other's inject directory 😈
 
