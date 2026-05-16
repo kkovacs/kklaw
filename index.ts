@@ -147,7 +147,7 @@ export class Gateway {
     const target = join(UPLOAD_DIR, name);
     try {
       await writeFile(target, buffer);
-      return name;
+      return target;
     } catch (err) {
       console.error(`[upload] failed to write ${target}: ${err instanceof Error ? err.message : String(err)}`);
       return null;
@@ -703,7 +703,11 @@ export class Gateway {
       const buffer = await this.downloadFile(largest.file_id);
       images = [{ type: "image", data: buffer.toString("base64"), mimeType: "image/jpeg" }];
       const savedName = await this.saveUpload(buffer, "image/jpeg");
-      if (savedName) ctx.reply(`📎 Saved: ${savedName}`).catch(() => {});
+      if (savedName) {
+        await ctx.reply(`📎 Saved: <code>${htmlEscape(savedName)}</code> — Sending to Pi…`, { parse_mode: "HTML" }).catch(() => {});
+      } else {
+        await ctx.reply("📤 Not saved (UPLOAD_DIR not set), directly sending to Pi…").catch(() => {});
+      }
     } catch (err) {
       console.error(`[telegram] photo download failed: ${err instanceof Error ? err.message : String(err)}`);
       await ctx.reply("Failed to download photo.");
@@ -735,10 +739,13 @@ export class Gateway {
     const doc = ctx.msg.document;
     if (!doc?.file_id) return;
 
-    const caption = ctx.msg.caption ?? "";
+    if (!UPLOAD_DIR) {
+      await ctx.reply("❌ UPLOAD_DIR is not set. Cannot save document.");
+      return;
+    }
 
     if (verbosity >= 2) {
-      dbg(2, `telegram document msg: ${JSON.stringify({ userId, chatId: ctx.chatId, caption, mimeType: doc.mime_type })}`);
+      dbg(2, `telegram document msg: ${JSON.stringify({ userId, chatId: ctx.chatId, caption: ctx.msg.caption ?? "", mimeType: doc.mime_type })}`);
     }
 
     let buffer: Buffer;
@@ -749,31 +756,12 @@ export class Gateway {
       await ctx.reply("Failed to download document.");
       return;
     }
-    this.saveUpload(buffer, doc.mime_type ?? "application/octet-stream", doc.file_name).then(savedName => {
-      if (savedName) ctx.reply(`📎 Saved: ${savedName}`).catch(() => {});
-    });
 
-    const isImage = doc.mime_type?.startsWith("image/") ?? false;
-
-    let images: ImageContent[] | undefined;
-    let text = caption;
-    if (isImage) {
-      images = [{ type: "image", data: buffer.toString("base64"), mimeType: doc.mime_type }];
-    } else if (UPLOAD_DIR) {
-      const name = doc.file_name ?? `${Date.now()}${extFromMime(doc.mime_type ?? "application/octet-stream")}`;
-      const path = join(UPLOAD_DIR, name);
-      const suffix = `\n\n[Uploaded file: ${path}]`;
-      text = caption ? caption + suffix : suffix.trim();
+    const mimeType = doc.mime_type ?? "application/octet-stream";
+    const savedName = await this.saveUpload(buffer, mimeType, doc.file_name);
+    if (savedName) {
+      await ctx.reply(`📎 Saved: <code>${htmlEscape(savedName)}</code> — Pi can access it but was not notified.`, { parse_mode: "HTML" }).catch(() => {});
     }
-
-    if (this.piStreaming) {
-      dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
-      this.queue.push({ chatId: ctx.chatId, text, images });
-      await ctx.react("👀");
-      return;
-    }
-
-    await this.startPiSession(ctx.chatId, text, api, images);
   }
 }
 

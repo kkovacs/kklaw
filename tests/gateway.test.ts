@@ -1797,15 +1797,32 @@ describe("Gateway.handlePhotoMessage", () => {
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("photo-data");
     gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-    gateway.saveUpload = async () => "1747380800000.jpeg";
+    gateway.saveUpload = async () => "/uploads/1747380800000.jpeg";
 
     const ctx = mockPhotoContext();
     ctx.reply = async (text) => { replies.push(text); };
 
     await gateway.handlePhotoMessage(ctx, api);
 
-    expect(replies).toEqual(["📎 Saved: 1747380800000.jpeg"]);
+    expect(replies).toEqual(["📎 Saved: <code>/uploads/1747380800000.jpeg</code> — Sending to Pi…"]);
     expect(piCommands.length).toBe(1);
+  });
+
+  it("replies 'Not saved' when UPLOAD_DIR is not set (saveUpload returns null)", async () => {
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("photo-data");
+    gateway.sendPi = () => {};
+    gateway.saveUpload = async () => null;
+
+    const ctx = mockPhotoContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(replies).toEqual(["📤 Not saved (UPLOAD_DIR not set), directly sending to Pi…"]);
+    expect(gateway.piStreaming).toBe(true);
   });
 
   it("processQueue dequeues message with images and starts session", async () => {
@@ -1893,150 +1910,51 @@ describe("Gateway.handleDocumentMessage", () => {
 
     await gateway.handleDocumentMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(0);
     expect(gateway.piStreaming).toBe(false);
     expect(replied).toBe(false);
   });
 
-  it("sends non-image documents as text prompts", async () => {
-    const piCommands: object[] = [];
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.downloadFile = async () => Buffer.from("pdf");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    const ctx = mockDocumentContext({
-      msg: { document: { file_id: "f1", mime_type: "application/pdf", file_name: "doc.pdf" } },
-    });
-    await gateway.handleDocumentMessage(ctx, api);
-
-    expect(gateway.piStreaming).toBe(true);
-    expect(piCommands).toEqual([{ type: "prompt", message: "" }]);
-  });
-
   it("ignores document with missing file_id", async () => {
-    const piCommands: object[] = [];
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.sendPi = () => {};
 
     const ctx = mockDocumentContext({ msg: { document: undefined } });
     await gateway.handleDocumentMessage(ctx, api);
 
     expect(gateway.piStreaming).toBe(false);
-    expect(piCommands).toEqual([]);
   });
 
-  it("starts a session with caption and image when pi is idle", async () => {
-    const piCommands: object[] = [];
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.downloadFile = async () => Buffer.from("docdata");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    const ctx = mockDocumentContext();
-    await gateway.handleDocumentMessage(ctx, api);
-
-    expect(gateway.piStreaming).toBe(true);
-    expect(piCommands).toEqual([{
-      type: "prompt",
-      message: "what's in this doc",
-      images: [{
-        type: "image",
-        data: Buffer.from("docdata").toString("base64"),
-        mimeType: "image/png",
-      }],
-    }]);
-  });
-
-  it("uses empty message when document has no caption", async () => {
-    const piCommands: object[] = [];
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.downloadFile = async () => Buffer.from("img");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    const ctx = mockDocumentContext({ msg: { caption: undefined, document: mockDocumentContext().msg.document } });
-    await gateway.handleDocumentMessage(ctx, api);
-
-    expect(piCommands[0]).toHaveProperty("message", "");
-    expect(piCommands[0]).toHaveProperty("images");
-  });
-
-  it("uses the document's actual MIME type", async () => {
-    const piCommands: object[] = [];
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.downloadFile = async () => Buffer.from("webp");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    const ctx = mockDocumentContext({
-      msg: { document: { file_id: "f1", mime_type: "image/webp", file_name: "sticker.webp" } },
-    });
-    await gateway.handleDocumentMessage(ctx, api);
-
-    expect(piCommands[0]).toHaveProperty("images", [{
-      type: "image",
-      data: Buffer.from("webp").toString("base64"),
-      mimeType: "image/webp",
-    }]);
-  });
-
-  it("replies 'Failed to download document.' on download error", async () => {
+  it("replies with error when UPLOAD_DIR is not set", async () => {
     const replies: string[] = [];
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.downloadFile = async () => { throw new Error("network down"); };
 
     const ctx = mockDocumentContext();
     ctx.reply = async (text) => { replies.push(text); };
 
     await gateway.handleDocumentMessage(ctx, api);
 
-    expect(replies).toEqual(["Failed to download document."]);
+    expect(replies).toEqual(["❌ UPLOAD_DIR is not set. Cannot save document."]);
     expect(gateway.piStreaming).toBe(false);
     expect(gateway.queue.length).toBe(0);
   });
 
-  it("replies with saved filename after document download", async () => {
-    const piCommands: object[] = [];
-    const replies: string[] = [];
+  it("does NOT start Pi session or queue (documents are never auto-passed)", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.sendPi = () => {};
     gateway.downloadFile = async () => Buffer.from("doc-data");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-    gateway.saveUpload = async () => "report.csv";
 
+    // Even with a valid document, UPLOAD_DIR is null → error reply, no Pi interaction
     const ctx = mockDocumentContext({
-      msg: { document: { file_id: "f1", mime_type: "image/png", file_name: "report.csv" } },
+      msg: { document: { file_id: "f1", mime_type: "application/pdf", file_name: "doc.pdf" } },
     });
-    ctx.reply = async (text) => { replies.push(text); };
 
     await gateway.handleDocumentMessage(ctx, api);
 
-    expect(replies).toEqual(["📎 Saved: report.csv"]);
-    expect(piCommands.length).toBe(1);
-  });
-
-  it("queues message with images when pi is busy", async () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.piStreaming = true;
-    gateway.downloadFile = async () => Buffer.from("busy-doc");
-    const reactions: string[] = [];
-    const ctx = mockDocumentContext();
-    ctx.react = async (emoji) => { reactions.push(emoji); };
-
-    await gateway.handleDocumentMessage(ctx, api);
-
-    expect(gateway.queue.length).toBe(1);
-    expect(gateway.queue[0]!.text).toBe("what's in this doc");
-    expect(gateway.queue[0]!.images).toEqual([{
-      type: "image",
-      data: Buffer.from("busy-doc").toString("base64"),
-      mimeType: "image/png",
-    }]);
-    expect(reactions).toEqual(["👀"]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
   });
 });
 

@@ -28,7 +28,7 @@ export interface MessageContext {
   chatId: number | string;
   from?: { id: number };
   msg: { text?: string };
-  reply(text: string): Promise<unknown>;
+  reply(text: string, other?: Record<string, unknown>): Promise<unknown>;
   react(emoji: string): Promise<unknown>;
 }
 
@@ -47,7 +47,7 @@ export interface PhotoMessageContext {
     caption?: string;
     photo: PhotoSize[];
   };
-  reply(text: string): Promise<unknown>;
+  reply(text: string, other?: Record<string, unknown>): Promise<unknown>;
   react(emoji: string): Promise<unknown>;
 }
 
@@ -62,7 +62,7 @@ export interface DocumentMessageContext {
       file_name?: string;
     };
   };
-  reply(text: string): Promise<unknown>;
+  reply(text: string, other?: Record<string, unknown>): Promise<unknown>;
   react(emoji: string): Promise<unknown>;
 }
 

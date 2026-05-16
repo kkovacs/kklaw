@@ -13,7 +13,7 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 
 ## Pipeline
 
-1. Telegram text/photo/document → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`. Documents with `image/*` MIME type handled identically via `bot.on("message:document")`. Non-image documents (CSV, PDF, etc.) are downloaded, saved to `UPLOAD_DIR` (if set), and the file path is appended to the prompt text so the LLM can read it with Pi's filesystem tools. If `UPLOAD_DIR` is set, every downloaded media file is also saved to that directory: photos get a timestamp-based name (e.g. `1747380800000.jpeg`), documents with `file_name` preserve the original filename. A `📎 Saved: <filename>` reply is sent to confirm. This lets the LLM access the file via Pi's filesystem tools if the initial prompt fails.
+1. Telegram text/photo/document → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`, and if `UPLOAD_DIR` is set also saved to disk with a timestamp-based name (e.g. `1747380800000.jpeg`) — a `📎 Saved: <code>&lt;full_path&gt;</code> — Sending to Pi…` reply confirms the save; otherwise `📤 Not saved (UPLOAD_DIR not set), directly sending to Pi…` is shown. Photos are auto-passed to Pi as `ImageContent[]` with the caption as prompt text. Documents: downloaded and saved to `UPLOAD_DIR` with original `file_name` preserved — the user gets a `📎 Saved: <code>&lt;full_path&gt;</code> — Pi can access it but was not notified.` reply. Documents are **never** auto-passed to the LLM; the user must send a follow-up text prompt referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, document uploads are rejected with `"❌ UPLOAD_DIR is not set."`
 2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos/documents). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
 3. Pi's `message_start` (assistant role) → creates a new Telegram placeholder message + per-message `Relay`. `message_update`/`text_delta` → current relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
 4. `message_end` → finalizes current relay. If no content produced (tool-call-only message), the placeholder is deleted. If an error arrived with no content, the placeholder is edited to show the error.
@@ -151,7 +151,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 - `/resume` shows limited results; no pagination
 - Photo media group debouncing not implemented
 - Photo download has no size limit check
-- Stickers not handled (photos and documents are)
+- Stickers not handled
 
 ## Pi/provider gotcha
 
