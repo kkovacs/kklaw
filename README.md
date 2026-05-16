@@ -1,14 +1,16 @@
-# There are many personal agents, but this one is _mine_. 😀
+# There are many personal agents, but this one is _mine_. 🫡
 
 **Lightweight gateway to connect Pi to Telegram**
 
-A tiny [grammy](https://grammy.dev) bot that connects your Telegram to your [Pi](https://pi.dev) agent running in RPC mode. Supports switching Pi sessions directly from your phone to keep context focused. Supports tasking your Pi agent from normal `cron` or `at`, inside the active context so you can follow up.
+A tiny self-hosted Telegram bot to connect to your [Pi](https://pi.dev) agent. Supports switching Pi sessions directly from your phone to keep context focused. Supports tasking Pi from shell (normal `cron` or `at`) inside the active context so you can follow up.
 
 ## Philosophy
 
-kklaw is intentionally minimal. It is strictly **"One user. One chat. One Pi."** — no multi-user support, no group chats. Just a direct, private connection between you and your Pi agent, any way you configured that up. Full π. No checks or balances. Zero friction. Zero separaton. _Absolute power!_ 💪
+kklaw is _intentionally_ minimal, like Pi itself. I'm actively removing any feature that can be done easier by `bash` or by the LLM.
 
-You also get to run bash from Telegram like `!rm -rf /` 😅
+It is strictly **"One user. One chat. One Pi."** — there will never be multi-user support or group chats. Just a direct, private connection between you and your Pi agent, any way you configured that up. Full π. No checks or balances. Zero friction. Zero separaton. _Absolute power!_ 💪
+
+You also get to run bash commands from Telegram like `!rm -rf /` 😅
 
 ## Inject / automation
 
@@ -21,7 +23,7 @@ This is the hook for automation. Some ideas:
 - **Monitoring alerts** — forward Prometheus alerts or health check failures so your agent can investigate
 - **Webhooks** — a tiny CGI script that writes the webhook payload to the inject directory
 
-No extra infrastructure. Just Unix and the filesystem.
+No extra features. Just Unix and the filesystem.
 
 ```bash
 # Example: send a daily briefing at 8 AM via cron
