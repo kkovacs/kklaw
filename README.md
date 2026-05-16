@@ -2,11 +2,11 @@
 
 **Lightweight gateway to connect Pi to Telegram**
 
-A tiny self-hosted Telegram bot to connect to your [Pi](https://pi.dev) agent. Supports switching Pi sessions directly from your phone to keep context focused. Supports tasking Pi from shell (normal `cron` or `at`) inside the active context so you can follow up.
+A tiny self-hosted Telegram bot to talk to your [Pi](https://pi.dev) AI agent harness. Supports switching Pi sessions directly from your phone to keep context on leash. Supports tasking Pi from shell (normal `cron` or `at`) inside the active context so you can follow up.
 
 ## Philosophy
 
-kklaw is _intentionally_ minimal, like Pi itself. I'm actively removing any feature that can be done easier by `bash` or by the LLM.
+💅`kklaw` is _intentionally_ minimal, like Pi itself. I'm actively removing any feature that can be done easier by `bash` or by the LLM.
 
 It is strictly **"One user. One chat. One Pi."** — there will never be multi-user support or group chats. Just a direct, private connection between you and your Pi agent, any way you configured that up. Full π. No checks or balances. Zero friction. Zero separaton. _Absolute power!_ 💪
 
@@ -14,22 +14,25 @@ You also get to run bash commands from Telegram like `!rm -rf /` 😅
 
 ## Inject / automation
 
-There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever you already have. kklaw watches an **inject directory** (`TELEGRAM_INJECT_DIR`). Any script can drop a text file into that directory, and kklaw will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
+There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever you already have. `kklaw` watches an **inject directory** (`TELEGRAM_INJECT_DIR`). Any script can drop a text file into that directory, and `kklaw` will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
 
 This is the hook for automation. Some ideas:
 
-- **Simulate HEARTBEAT** — with cron: `*/15 * * * * echo "Please do HEARTBEAT.md" > ~/.pi/agent/injects/heartbeat.txt`
-- **Scheduled wake-ups** — tell your LLM about unix `at` and kklaw inject, and tell it to "do something in 45 minutes"
+- **Simulate HEARTBEAT** — in the _main session_ so you can ask the LLM about it _(I'm looking at you, Hermes)_
+- **Scheduled wake-ups** — tell your LLM about unix `at` and `kklaw` inject, and tell it to "do something in 45 minutes"
 - **Email triage** — run `fdm` to fetch mail, and wake the LLM _only_ if there was any
 - **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
 - **Webhooks** — make a tiny script that writes the webhook payload to the inject directory
-- **Your own Moltbook** — Run two or more kklaws that write into each other's inject directory 😈
+- **Your own Moltbook** — Run two or more `kklaw`s that write into each other's inject directory 😈
 
 No extra features. Just you and the filesystem.
 
 ```bash
 # Example: send a daily briefing at 8 AM via cron
 0 8 * * * echo "Summarize my calendar and unread emails" > ~/.pi/agent/injects/morning.txt
+
+# OpenClaw-style HEARTBEAT
+`*/15 * * * * echo "Please do HEARTBEAT.md" > ~/.pi/agent/injects/heartbeat.txt`
 
 # Example: Wake the LLM only on actual incoming email in daytime
 */5 8-20 * * * fdm fetch | grep -qv "0 messages" && cho "New email, please process!" > ~/.pi/agent/injects/emails.txt
@@ -55,7 +58,7 @@ END
 
 ## Session switching
 
-Unlike Pi extensions (which run inside Pi and are locked to one session), kklaw lets you route between multiple Pi sessions from the same Telegram chat. This allows you to maintain focused contexts or keep different tasks (e.g., personal assistant vs. project work) cleanly separated.
+Unlike Pi extensions (which run inside Pi and are locked to one session), `kklaw` lets you route between multiple Pi sessions from the same Telegram chat. This allows you to maintain focused contexts or keep different tasks (e.g., personal assistant vs. project work) cleanly separated.
 
 For example, juggling multiple sessions:
 
@@ -104,7 +107,7 @@ bun build ./index.ts --compile --minify --bytecode --outfile kklaw
 ./kklaw
 ```
 
-Every argument after the `--` is passed through to the Pi process that gets started. For example, to start kklaw in extra-verbose mode, and always continue the previous session:
+Every argument after the `--` is passed through to the Pi process that gets started. For example, to start `kklaw` in extra-verbose mode, and always continue the previous session:
 
 ```bash
 bun run index.ts -vvv -- --continue
@@ -134,7 +137,7 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `/name <name>` | Name the current session |
 | `/delete` | Delete the current session and start fresh |
 | `/model [filter]` | List all available LLMs, or filter + pick one |
-| `/status` | Show kklaw uptime, Pi pid, streaming state, queue |
+| `/status` | Show `kklaw` uptime, Pi pid, streaming state, queue |
 | `/session` | Show Pi session status and stats |
 | `/quit` | Stop the gateway |
 
