@@ -2,7 +2,7 @@
 
 **Lightweight gateway to connect Pi to Telegram**
 
-A tiny self-hosted Telegram bot to talk to your [Pi](https://pi.dev) AI agent harness. Supports switching Pi sessions directly from your phone to keep context on leash. Supports tasking Pi from shell (normal `cron` or `at`) inside the active context so you can follow up.
+A tiny self-hosted Telegram bot to talk to your [Pi](https://pi.dev) AI agent harness. Supports switching Pi sessions directly from your phone to keep context on leash. Supports tasking Pi from shell (normal `cron` or `at`) inside the main context so you can follow up.
 
 ## Philosophy
 
@@ -20,9 +20,9 @@ This is the hook for automation. Some ideas:
 
 - **Simulate HEARTBEAT** — in the _main session_ so you can ask the LLM about it _(I'm looking at you, Hermes)_
 - **Scheduled wake-ups** — Skill your LLM with `at` and `kklaw` inject, and tell it to "do this in 45 minutes"
-- **Email triage** — run `fdm` to fetch mail, and wake the LLM _only_ if there was any
+- **Email triage** — fetch mails from cron but wake the LLM _only_ if there was any
 - **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
-- **Log watcher** — with a `tail`, a `grep` and a redirect, you can wake your agent when something happens
+- **Log monitor** — with a `tail -f` a `grep` and a redirect, you can wake your agent when something happens
 - **Webhooks** — make a tiny script that writes the webhook payload to the inject directory
 - **Your own Moltbook** — Run two or more `kklaw`s that write into each other's inject directory 😈
 
