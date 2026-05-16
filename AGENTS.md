@@ -13,7 +13,7 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 
 ## Pipeline
 
-1. Telegram text/photo/document → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`. Documents with `image/*` MIME type handled identically via `bot.on("message:document")`.
+1. Telegram text/photo/document → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`. Documents with `image/*` MIME type handled identically via `bot.on("message:document")`. Non-image documents (CSV, PDF, etc.) are downloaded, saved to `MEDIA_UPLOAD_PATH` (if set), and the file path is appended to the prompt text so the LLM can read it with Pi's filesystem tools. If `MEDIA_UPLOAD_PATH` is set, every downloaded media file is also saved to that directory: photos get a timestamp-based name (e.g. `1747380800000.jpeg`), documents with `file_name` preserve the original filename. A `📎 Saved: <filename>` reply is sent to confirm. This lets the LLM access the file via Pi's filesystem tools if the initial prompt fails.
 2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos/documents). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
 3. Pi's `message_start` (assistant role) → creates a new Telegram placeholder message + per-message `Relay`. `message_update`/`text_delta` → current relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
 4. `message_end` → finalizes current relay. If no content produced (tool-call-only message), the placeholder is deleted. If an error arrived with no content, the placeholder is edited to show the error.
@@ -147,11 +147,13 @@ Commands use loose coupling: the handler stores a per-command chatId field (`las
 - `/resume` shows limited results; no pagination
 - Photo media group debouncing not implemented
 - Photo download has no size limit check
-- Stickers not handled (photos and `image/*` documents are)
+- Stickers not handled (photos and documents are)
 
 ## Pi/provider gotcha
 
 Pi stores assistant `thinking` blocks with `thinkingSignature: "reasoning"` in session history. Providers using `openai-completions` API may reject those `reasoning` fields as extra inputs, producing `400 Error from provider`. The gateway surfaces this error to the user instead of leaving a frozen placeholder. A `/new` session clears the history as a workaround.
+
+Some providers return transient `400` errors for image prompts even when their model listing says `images: yes` (observed with Xiaomi `mimo-v2.5` via opencode-go: `400 Error from provider (Xiaomi): Param Incorrect`). The error consumes 0 tokens (request rejected before processing). Retrying the same image succeeds — identical payload, identical model. Having `MEDIA_UPLOAD_PATH` set allows the LLM to re-read the saved file directly without another Telegram API roundtrip.
 
 ## Pi RPC types used
 
@@ -175,6 +177,7 @@ Bun auto-loads `.env` from the project root (the directory containing `package.j
 | `PI_PATH` | path to pi binary (`~` expanded) | `pi` (in PATH) |
 | `PI_SESSION_DIR` | root dir for session `.jsonl` scan | `~/.pi/agent/sessions/` |
 | `TELEGRAM_INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
+| `MEDIA_UPLOAD_PATH` | directory to save incoming photos/documents | — (disabled if unset) |
 
 Extra Pi flags passed after `--`:
 

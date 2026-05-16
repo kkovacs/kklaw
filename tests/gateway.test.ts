@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Gateway } from "../index";
+import { Gateway, extFromMime } from "../index";
 import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "../telegram";
 import { loadFixtureLines } from "./helpers";
 import type { PiClient } from "../pi-client";
@@ -1646,6 +1646,24 @@ describe("Gateway.handlePhotoMessage", () => {
     expect(reactions).toEqual(["👀"]);
   });
 
+  it("replies with saved filename after photo download", async () => {
+    const piCommands: object[] = [];
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("photo-data");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.saveUpload = async () => "1747380800000.jpeg";
+
+    const ctx = mockPhotoContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handlePhotoMessage(ctx, api);
+
+    expect(replies).toEqual(["📎 Saved: 1747380800000.jpeg"]);
+    expect(piCommands.length).toBe(1);
+  });
+
   it("processQueue dequeues message with images and starts session", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
@@ -1736,7 +1754,7 @@ describe("Gateway.handleDocumentMessage", () => {
     expect(replied).toBe(false);
   });
 
-  it("ignores non-image documents", async () => {
+  it("sends non-image documents as text prompts", async () => {
     const piCommands: object[] = [];
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
@@ -1748,8 +1766,8 @@ describe("Gateway.handleDocumentMessage", () => {
     });
     await gateway.handleDocumentMessage(ctx, api);
 
-    expect(gateway.piStreaming).toBe(false);
-    expect(piCommands).toEqual([]);
+    expect(gateway.piStreaming).toBe(true);
+    expect(piCommands).toEqual([{ type: "prompt", message: "" }]);
   });
 
   it("ignores document with missing file_id", async () => {
@@ -1836,6 +1854,26 @@ describe("Gateway.handleDocumentMessage", () => {
     expect(gateway.queue.length).toBe(0);
   });
 
+  it("replies with saved filename after document download", async () => {
+    const piCommands: object[] = [];
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("doc-data");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.saveUpload = async () => "report.csv";
+
+    const ctx = mockDocumentContext({
+      msg: { document: { file_id: "f1", mime_type: "image/png", file_name: "report.csv" } },
+    });
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleDocumentMessage(ctx, api);
+
+    expect(replies).toEqual(["📎 Saved: report.csv"]);
+    expect(piCommands.length).toBe(1);
+  });
+
   it("queues message with images when pi is busy", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
@@ -1855,5 +1893,32 @@ describe("Gateway.handleDocumentMessage", () => {
       mimeType: "image/png",
     }]);
     expect(reactions).toEqual(["👀"]);
+  });
+});
+
+describe("extFromMime", () => {
+  it("extracts common image extensions", () => {
+    expect(extFromMime("image/jpeg")).toBe(".jpeg");
+    expect(extFromMime("image/png")).toBe(".png");
+    expect(extFromMime("image/gif")).toBe(".gif");
+    expect(extFromMime("image/webp")).toBe(".webp");
+  });
+
+  it("handles svg+xml override", () => {
+    expect(extFromMime("image/svg+xml")).toBe(".svg");
+  });
+
+  it("extracts application extensions", () => {
+    expect(extFromMime("application/pdf")).toBe(".pdf");
+    expect(extFromMime("application/zip")).toBe(".zip");
+  });
+
+  it("handles octet-stream fallback", () => {
+    expect(extFromMime("application/octet-stream")).toBe(".bin");
+  });
+
+  it("falls back to .bin for malformed mime", () => {
+    expect(extFromMime("")).toBe(".bin");
+    expect(extFromMime("no-slash")).toBe(".bin");
   });
 });

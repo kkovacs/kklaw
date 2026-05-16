@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { unlink } from "node:fs/promises";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
@@ -16,6 +16,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 const SESSION_DIR = (process.env.PI_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions")).replace(/^~/, homedir());
 const INJECT_DIR = (process.env.TELEGRAM_INJECT_DIR ?? join(homedir(), ".pi", "agent", "injects")).replace(/^~/, homedir());
+const UPLOAD_PATH = (process.env.MEDIA_UPLOAD_PATH ?? "").replace(/^~/, homedir()) || null;
 
 // Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
@@ -80,6 +81,17 @@ interface ImageContent {
   mimeType: string;
 }
 
+export function extFromMime(mimeType: string): string {
+  const slash = mimeType.indexOf("/");
+  if (slash === -1) return ".bin";
+  const sub = mimeType.slice(slash + 1);
+  const overrides: Record<string, string> = {
+    "svg+xml": ".svg",
+    "octet-stream": ".bin",
+  };
+  return overrides[sub] ?? `.${sub}`;
+}
+
 interface ModelInfo {
   id?: string;
   name?: string;
@@ -127,6 +139,20 @@ export class Gateway {
     this.allowedUserId = options.allowedUserId;
     this.api = options.api;
     this.botToken = options.botToken ?? "";
+  }
+
+  async saveUpload(buffer: Buffer, mimeType: string, filename?: string): Promise<string | null> {
+    if (!UPLOAD_PATH) return null;
+    const ext = extFromMime(mimeType);
+    const name = filename ?? `${Date.now()}${ext}`;
+    const target = join(UPLOAD_PATH, name);
+    try {
+      await writeFile(target, buffer);
+      return name;
+    } catch (err) {
+      console.error(`[upload] failed to write ${target}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   handlePiEvent = async (event: PiEvent | PiResponse): Promise<void> => {
@@ -699,6 +725,8 @@ export class Gateway {
     try {
       const buffer = await this.downloadFile(largest.file_id);
       images = [{ type: "image", data: buffer.toString("base64"), mimeType: "image/jpeg" }];
+      const savedName = await this.saveUpload(buffer, "image/jpeg");
+      if (savedName) ctx.reply(`📎 Saved: ${savedName}`).catch(() => {});
     } catch (err) {
       console.error(`[telegram] photo download failed: ${err instanceof Error ? err.message : String(err)}`);
       await ctx.reply("Failed to download photo.");
@@ -729,22 +757,36 @@ export class Gateway {
 
     const doc = ctx.msg.document;
     if (!doc?.file_id) return;
-    if (!doc.mime_type?.startsWith("image/")) return;
 
-    const text = ctx.msg.caption ?? "";
+    const caption = ctx.msg.caption ?? "";
 
     if (verbosity >= 2) {
-      dbg(2, `telegram document msg: ${JSON.stringify({ userId, chatId: ctx.chatId, caption: text, mimeType: doc.mime_type })}`);
+      dbg(2, `telegram document msg: ${JSON.stringify({ userId, chatId: ctx.chatId, caption, mimeType: doc.mime_type })}`);
     }
 
-    let images: ImageContent[];
+    let buffer: Buffer;
     try {
-      const buffer = await this.downloadFile(doc.file_id);
-      images = [{ type: "image", data: buffer.toString("base64"), mimeType: doc.mime_type }];
+      buffer = await this.downloadFile(doc.file_id);
     } catch (err) {
       console.error(`[telegram] document download failed: ${err instanceof Error ? err.message : String(err)}`);
       await ctx.reply("Failed to download document.");
       return;
+    }
+    this.saveUpload(buffer, doc.mime_type ?? "application/octet-stream", doc.file_name).then(savedName => {
+      if (savedName) ctx.reply(`📎 Saved: ${savedName}`).catch(() => {});
+    });
+
+    const isImage = doc.mime_type?.startsWith("image/") ?? false;
+
+    let images: ImageContent[] | undefined;
+    let text = caption;
+    if (isImage) {
+      images = [{ type: "image", data: buffer.toString("base64"), mimeType: doc.mime_type }];
+    } else if (UPLOAD_PATH) {
+      const name = doc.file_name ?? `${Date.now()}${extFromMime(doc.mime_type ?? "application/octet-stream")}`;
+      const path = join(UPLOAD_PATH, name);
+      const suffix = `\n\n[Uploaded file: ${path}]`;
+      text = caption ? caption + suffix : suffix.trim();
     }
 
     if (this.piStreaming) {
@@ -972,6 +1014,11 @@ if (import.meta.main) {
     console.error(`[cmd] setMyCommands failed: ${err.message}`);
   });
 
+
+  if (UPLOAD_PATH) {
+    await mkdir(UPLOAD_PATH, { recursive: true });
+    dbg(1, `upload dir ensured: ${UPLOAD_PATH}`);
+  }
 
   spawnPi();
   gateway.lastChatId = allowedUserId;
