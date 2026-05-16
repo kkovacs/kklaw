@@ -7,9 +7,9 @@
     "@types/bun": "latest"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^5.9.3"
   },
   "dependencies": {
-    "grammy": "^1.42.0"
+    "grammy": "^1.43.0"
   }
 }
