@@ -18,25 +18,66 @@ There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever y
 
 This is the hook for automation. Some ideas:
 
-- **Scheduled wake-ups** — `echo "Good morning! Here's what happened overnight..." > ~/.pi/agent/injects/wakeup.txt` from a cron job
-- **Email triage** — pipe new messages from `notmuch` / `mutt` / a mail hook into an inject file
-- **Monitoring alerts** — forward Prometheus alerts or health check failures so your agent can investigate
-- **Webhooks** — a tiny CGI script that writes the webhook payload to the inject directory
+- **Simulate HEARTBEAT** — with cron: `*/15 * * * * echo "Please do HEARTBEAT.md" > ~/.pi/agent/injects/heartbeat.txt`
+- **Scheduled wake-ups** — tell your LLM about unix `at` and kklaw inject, and tell it to "do something in 45 minutes"
+- **Email triage** — run `fdm` to fetch mail, and wake the LLM _only_ if there was any
+- **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
+- **Webhooks** — make a tiny script that writes the webhook payload to the inject directory
+- **Your own Moltbook** — Run two or more kklaws that write into each other's inject directory 😈
 
-No extra features. Just Unix and the filesystem.
+No extra features. Just you and the filesystem.
 
 ```bash
 # Example: send a daily briefing at 8 AM via cron
 0 8 * * * echo "Summarize my calendar and unread emails" > ~/.pi/agent/injects/morning.txt
+
+# Example: Wake the LLM only on actual incoming email in daytime
+*/5 8-20 * * * fdm fetch | grep -qv "0 messages" && cho "New email, please process!" > ~/.pi/agent/injects/emails.txt
 ```
 
-## How It Works
+If you have `apt install at` (how could they ere remove `at` from the default install? I'm sure it's systemd's fault somehow):
 
-kklaw starts the `pi` binary rather than running it as an embedded library. This lets you bring your own Pi instance — any extensions, skills, configuration — and kklaw acts as a lightweight bridge to Telegram.
+```bash
+at now + 10 minutes <<EOF
+echo "Initiate self-destruct sequence!" > /home/user/.pi/agent/injects/hi.txt
+EOF
 
-It uses RPC specifically to enable **session switching**. Unlike Pi extensions (which run inside Pi and are locked to one session), kklaw lets you route between multiple Pi sessions from the same Telegram chat. This allows you to maintain focused contexts or keep different tasks (e.g., personal assistant vs. project work) cleanly separated.
+at 08:30 tomorrow << END
+cat > /home/user/.pi/agent/injects/morning-brief.md << 'MSG'
+Reminder for tomorrow morning:
 
-## Quick start
+- Review PR #42
+- Prep for 10am client call
+- Push timesheet
+MSG
+END
+```
+
+## Session switching
+
+Unlike Pi extensions (which run inside Pi and are locked to one session), kklaw lets you route between multiple Pi sessions from the same Telegram chat. This allows you to maintain focused contexts or keep different tasks (e.g., personal assistant vs. project work) cleanly separated.
+
+For example, juggling multiple sessions:
+
+```
+── Session "evil plan" ──
+ Agent: So, do you want me to execute our evil plan?
+  User: /new                       ← start a fresh session, shelving this one
+── Session "new" (unnamed) ──
+  User: By the way, what's 300 feet to km?
+ Agent: 300 feet = 0.09144 km (or about 91.4 meters).
+  User: And in NM?
+ Agent: 300 feet = 0.0494 NM (nautical miles).
+  User: /delete                    ← nuke this session, it was just a calculator
+  User: /resume                    ← pick "evil plan" from the inline menu
+── Session "evil plan" (resumed) ──
+  User: Yes, proceed with the evil plan.
+  User: /resume                    ← pick "groceries" from the inline menu
+── Session "groceries" (resumed) ──
+  User: Also, add 2 kgs of garlic to the list.
+```
+
+## INSTALL
 
 ```bash
 # 1. Install Pi (see https://pi.dev)
