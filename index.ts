@@ -124,8 +124,7 @@ export class Gateway {
   piErrorSent = false;
   turnToolCounts: Map<string, number> = new Map();
   lastTypingSent = 0;
-  deleteRequestChatId: number | string = 0;
-  bashRequestChatId: number | string = 0;
+  currentSessionId: string | null = null;
   sessionPicker: Map<string, SessionInfo> = new Map();
   modelFilter?: string;
   allowedUserId: number;
@@ -179,37 +178,9 @@ export class Gateway {
       } else {
         dbg(1, `pi response ok: ${resp.command}`);
         if (resp.command === "get_state" && this.lastChatId) {
+          const data = resp.data as { sessionId?: string } | undefined;
+          if (data?.sessionId) this.currentSessionId = data.sessionId;
           this.showStatus(this.lastChatId, resp.data);
-        }
-        if (resp.command === "get_state" && this.deleteRequestChatId) {
-          const chatId = this.deleteRequestChatId;
-          this.deleteRequestChatId = 0;
-          const data = resp.data as { sessionId?: string; sessionFile?: string } | undefined;
-          const sessionId = data?.sessionId;
-          try {
-            let info = sessionId ? this.sessionPicker.get(sessionId) : undefined;
-            if (!info && sessionId) {
-              this.scanRecentSessions();
-              info = this.sessionPicker.get(sessionId);
-            }
-            if (info) {
-              await this.deleteFile(info.path);
-              dbg(1, `deleteSession: unlinked ${info.path}`);
-            } else {
-              console.error(`[delete] session ${sessionId ?? "?"} not found in picker; skipping unlink`);
-            }
-          } catch (err: any) {
-            if (err?.code !== "ENOENT") {
-              console.error(`[delete] unlink failed: ${err?.message ?? err}`);
-            }
-          }
-          this.resetSession("/delete");
-          this.sendPi({ type: "new_session" });
-          try {
-            await this.api.sendMessage(chatId, "🗑️ Session deleted. 🆕 New session started.");
-          } catch (e) {
-            console.error(`[delete] sendMessage failed: ${e}`);
-          }
         }
         if (resp.command === "get_session_stats" && this.lastChatId) {
           this.showStats(this.lastChatId, resp.data);
@@ -220,16 +191,14 @@ export class Gateway {
         if (resp.command === "get_available_models" && this.lastChatId) {
           this.showModels(this.lastChatId, resp.data);
         }
-        if (resp.command === "bash" && this.bashRequestChatId) {
-          const chatId = this.bashRequestChatId;
-          this.bashRequestChatId = 0;
+        if (resp.command === "bash" && this.lastChatId) {
           const d = resp.data as { output?: string; exitCode?: number; truncated?: boolean } | undefined;
           const header = `Exit code: ${d?.exitCode ?? "?"}${d?.truncated ? " (truncated)" : ""}`;
           const output = d?.output ?? "(no output)";
           const combined = `${header}\n\n${output}`;
           const chunks = splitTelegramText(combined, 3900);
           for (const chunk of chunks) {
-            await this.api.sendMessage(chatId, `<pre>${htmlEscape(chunk)}</pre>`, { parse_mode: "HTML" })
+            await this.api.sendMessage(this.lastChatId, `<pre>${htmlEscape(chunk)}</pre>`, { parse_mode: "HTML" })
               .catch((err: Error) => console.error(`[telegram] bash result failed: ${err.message}`));
           }
         }
@@ -444,6 +413,7 @@ export class Gateway {
     this.currentPlaceholderMessageId = 0;
     this.lastPiError = undefined;
     this.piErrorSent = false;
+    this.currentSessionId = null;
   }
 
   scanRecentSessions(limit: number = 8, sessionDir?: string): SessionInfo[] {
@@ -681,7 +651,7 @@ export class Gateway {
         await ctx.reply("Usage: !&lt;command&gt;", { parse_mode: "HTML" });
         return;
       }
-      this.bashRequestChatId = ctx.chatId;
+      this.lastChatId = ctx.chatId;
       this.sendPi({ type: "bash", command });
       return;
     }
@@ -862,7 +832,9 @@ if (import.meta.main) {
   bot.command("new", async (ctx) => {
     dbg(1, "/new");
     gateway.resetSession("/new");
+    gateway.lastChatId = ctx.chatId;
     gateway.sendPi({ type: "new_session" });
+    gateway.sendPi({ type: "get_state" });
     await ctx.reply("🆕 New session.");
   });
 
@@ -898,9 +870,35 @@ if (import.meta.main) {
 
   bot.command("delete", async (ctx) => {
     dbg(1, "/delete");
-    gateway.deleteRequestChatId = ctx.chatId;
+    gateway.lastChatId = ctx.chatId;
+
+    const sessionId = gateway.currentSessionId;
+    if (sessionId) {
+      try {
+        let info = gateway.sessionPicker.get(sessionId);
+        if (!info) {
+          gateway.scanRecentSessions();
+          info = gateway.sessionPicker.get(sessionId);
+        }
+        if (info) {
+          await gateway.deleteFile(info.path);
+          dbg(1, `deleteSession: unlinked ${info.path}`);
+        } else {
+          console.error(`[delete] session ${sessionId} not found in picker; skipping unlink`);
+        }
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") {
+          console.error(`[delete] unlink failed: ${err?.message ?? err}`);
+        }
+      }
+    } else {
+      console.error("[delete] no current session ID to delete");
+    }
+
+    gateway.resetSession("/delete");
+    gateway.sendPi({ type: "new_session" });
     gateway.sendPi({ type: "get_state" });
-    await ctx.reply("🗑️ Deleting session...");
+    await ctx.reply("🗑️ Session deleted. 🆕 New session started.");
   });
 
   bot.command("resume", async (ctx) => {
@@ -936,6 +934,8 @@ if (import.meta.main) {
     }
 
     gateway.switchToSession(sessionId);
+    gateway.lastChatId = ctx.chatId!;
+    gateway.sendPi({ type: "get_state" });
     await ctx.answerCallbackQuery("✅ Switched.");
 
     const label = info.name

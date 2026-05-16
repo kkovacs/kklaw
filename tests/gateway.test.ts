@@ -489,117 +489,121 @@ describe("Gateway.handlePiEvent", () => {
     expect(gateway.turnToolCounts.get("bash")).toBe(1);
   });
 
-  it("deletes session, resets state, and starts new session on get_state response", async () => {
-    const sent: { chatId: number | string; text: string }[] = [];
-    const piCommands: object[] = [];
-    const deletedPaths: string[] = [];
+  it("stores currentSessionId from get_state response", async () => {
+    const sent: string[] = [];
     const api: TelegramApi = {
       ...mockApi(),
-      sendMessage: async (chatId, text) => { sent.push({ chatId, text }); return { message_id: 1 }; },
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
     };
     const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    gateway.deleteRequestChatId = 123;
-    gateway.sessionPicker.set("sid-1", { path: "/fake/sid-1.jsonl", id: "sid-1", created: "2026-05-15T00:00:00.000Z", mtime: 1 });
+    gateway.lastChatId = 123;
+    expect(gateway.currentSessionId).toBe(null);
 
     await gateway.handlePiEvent({
       type: "response", command: "get_state", success: true,
-      data: { sessionId: "sid-1", sessionFile: "sid-1.jsonl" },
+      data: { sessionId: "sid-1", sessionFile: "sid-1.jsonl", model: { provider: "p", id: "m" } },
     });
 
-    expect(deletedPaths).toEqual(["/fake/sid-1.jsonl"]);
-    expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(gateway.deleteRequestChatId).toBe(0);
-    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.currentSessionId).toBe("sid-1");
     expect(sent.length).toBe(1);
-    expect(sent[0]).toEqual({ chatId: 123, text: "🗑️ Session deleted. 🆕 New session started." });
+    expect(sent[0]).toContain("sid-1");
   });
 
-  it("skips unlink when session not in picker, still resets and starts new", async () => {
-    const sent: string[] = [];
-    const piCommands: object[] = [];
-    const deletedPaths: string[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-    };
+  it("leaves currentSessionId null when get_state has no sessionId", async () => {
+    const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-    gateway.deleteRequestChatId = 123;
-
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: { sessionId: "nonexistent" },
-    });
-
-    expect(deletedPaths).toEqual([]);
-    expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(sent).toEqual(["🗑️ Session deleted. 🆕 New session started."]);
-    expect(gateway.deleteRequestChatId).toBe(0);
-  });
-
-  it("still resets and starts new session when get_state data has no sessionId", async () => {
-    const sent: string[] = [];
-    const piCommands: object[] = [];
-    const deletedPaths: string[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-    gateway.deleteRequestChatId = 123;
+    gateway.lastChatId = 123;
+    gateway.currentSessionId = "old";
 
     await gateway.handlePiEvent({
       type: "response", command: "get_state", success: true,
       data: {},
     });
 
-    expect(deletedPaths).toEqual([]);
-    expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(sent).toEqual(["🗑️ Session deleted. 🆕 New session started."]);
+    expect(gateway.currentSessionId).toBe("old");
   });
 
-  it("does NOT trigger delete logic on non-get_state responses with deleteRequestChatId set", () => {
-    const deletedPaths: string[] = [];
+  it("get_state response does NOT trigger file deletion", async () => {
+    let deleted = false;
     const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    gateway.deleteFile = async (path) => { deletedPaths.push(path); };
-    gateway.sendPi = () => {};
-    gateway.deleteRequestChatId = 123;
-
-    gateway.handlePiEvent({
-      type: "response", command: "get_session_stats", success: true,
-      data: { sessionId: "sid-1" },
-    });
-
-    expect(deletedPaths).toEqual([]);
-  });
-
-  it("proceeds with reset+new even if deleteFile throws", async () => {
-    // XXX: only testing ENOENT here since it's the expected non-fatal error
-    const sent: string[] = [];
-    const piCommands: object[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.deleteFile = async () => { const e: NodeJS.ErrnoException = new Error("ENOENT"); e.code = "ENOENT"; throw e; };
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-    gateway.deleteRequestChatId = 123;
+    gateway.deleteFile = async () => { deleted = true; };
+    gateway.lastChatId = 123;
+    gateway.currentSessionId = "sid-1";
     gateway.sessionPicker.set("sid-1", { path: "/fake/sid-1.jsonl", id: "sid-1", created: "2026-05-15T00:00:00.000Z", mtime: 1 });
 
     await gateway.handlePiEvent({
       type: "response", command: "get_state", success: true,
-      data: { sessionId: "sid-1" },
+      data: { sessionId: "sid-2" },
     });
 
-    expect(piCommands).toEqual([{ type: "new_session" }]);
-    expect(sent).toEqual(["🗑️ Session deleted. 🆕 New session started."]);
+    expect(deleted).toBe(false);
+    expect(gateway.currentSessionId).toBe("sid-2");
+  });
+
+  it("preserves currentSessionId through delete flow: stored → reset clears → get_state restores", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      ...mockApi(),
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+
+    // Simulate normal operation: a previous get_state stored the session ID
+    gateway.currentSessionId = "old-sid";
+    gateway.sessionPicker.set("old-sid", { path: "/tmp/old.jsonl", id: "old-sid", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
+
+    // Simulate /delete: read stored ID, delete, reset, then new_session + get_state
+    const sessionId = gateway.currentSessionId;
+    expect(sessionId).toBe("old-sid");
+
+    gateway.resetSession("/delete");
+    expect(gateway.currentSessionId).toBeNull();
+
+    // Simulate get_state response for the new session
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: { sessionId: "new-sid", model: { provider: "p", id: "m" } },
+    });
+
+    expect(gateway.currentSessionId).toBe("new-sid");
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("new-sid");
+  });
+
+  it("stores currentSessionId on /new flow: resetSession → get_state", async () => {
+    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
+    gateway.lastChatId = 123;
+    expect(gateway.currentSessionId).toBeNull();
+
+    gateway.resetSession("/new");
+    expect(gateway.currentSessionId).toBeNull();
+
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: { sessionId: "new-sid", model: { provider: "p", id: "m" } },
+    });
+
+    expect(gateway.currentSessionId).toBe("new-sid");
+  });
+
+  it("stores currentSessionId on /resume flow: switchToSession (resetSession) → get_state", async () => {
+    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
+    gateway.sendPi = () => {};
+    gateway.lastChatId = 123;
+    gateway.currentSessionId = "old-sid";
+    gateway.sessionPicker.set("target", { path: "/tmp/t.jsonl", id: "target", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
+
+    gateway.switchToSession("target");
+    expect(gateway.currentSessionId).toBeNull();
+
+    await gateway.handlePiEvent({
+      type: "response", command: "get_state", success: true,
+      data: { sessionId: "new-sid" },
+    });
+
+    expect(gateway.currentSessionId).toBe("new-sid");
   });
 });
 
@@ -661,6 +665,13 @@ describe("Gateway.resetSession", () => {
     expect(gateway.piStreaming).toBe(false);
     expect(gateway.queue.length).toBe(0);
     expect(gateway.currentRelay).toBeNull();
+  });
+
+  it("clears currentSessionId", () => {
+    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
+    gateway.currentSessionId = "sid-42";
+    gateway.resetSession("test");
+    expect(gateway.currentSessionId).toBeNull();
   });
 });
 
@@ -1224,6 +1235,41 @@ describe("Gateway.handlePiEvent command routing", () => {
 
     gateway.handlePiEvent(JSON.parse(`
       {"type":"response","command":"get_available_models","success":true,"data":{"models":[]}}
+    `));
+
+    expect(called).toBe(false);
+  });
+
+  it("routes bash response via lastChatId, sending output as <pre> chunks", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"bash","success":true,"data":{"output":"hello from bash","exitCode":0}}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("hello from bash");
+    expect(messages[0]!.text).toContain("Exit code: 0");
+  });
+
+  it("does NOT route bash response when lastChatId is 0", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 0;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"bash","success":true,"data":{"output":"hi","exitCode":0}}
     `));
 
     expect(called).toBe(false);

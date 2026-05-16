@@ -108,20 +108,22 @@ External tool writes a file to the inject dir → `InjectWatcher.scan()` detects
 
 ## Slash commands
 
-Commands use loose coupling: the handler stores a per-command chatId field (`lastChatId`, `bashRequestChatId`, `deleteRequestChatId`), fires the RPC; `handlePiEvent` response handler picks it up and posts to that chat. All commands (except `/start`) require auth via `bot.filter()`.
+Commands use loose coupling: the handler sets `lastChatId` (routing target) and/or `currentSessionId` (for in-memory lookups, e.g. `/delete`), fires the RPC; `handlePiEvent` response handler picks it up and posts to `lastChatId`. All commands (except `/start`) require auth via `bot.filter()`.
+
+Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. This means commands like `/delete` can use the stored ID directly without a roundtrip. `resetSession()` clears `currentSessionId`.
 
 | Telegram command | RPC command | Response |
 |------------------|-------------|----------|
-| `/new` | `new_session` | cancels relay + resets state via `resetSession()` |
+| `/new` | `new_session` → `get_state` | cancels relay + resets state; shows new session status |
 | `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping |
 | `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue |
-| `/resume` | (none; filesystem scan) | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC |
+| `/resume` | (none; filesystem scan) | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC → `get_state` to show new session status |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
-| `/delete` | `get_state` → unlink → `new_session` | looks up session file in `sessionPicker` by `sessionId`, deletes it, resets + new session |
+| `/delete` | `new_session` → `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
-| `!command` | `bash` | stores `bashRequestChatId`, runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler |
+| `!command` | `bash` | sets `lastChatId`, runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler |
 
 ## Key design decisions
 
@@ -131,7 +133,7 @@ Commands use loose coupling: the handler stores a per-command chatId field (`las
 - **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end` don't trigger it.
 - **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).
 - **MarkdownV2 escape**: relaxed escape — `*` `_` `` ` `` pass through for Pi's formatting; all other reserved chars (`[`, `(`, `~`, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`, `\`) escaped.
-- **Sequential processing**: Pi handles one prompt at a time. Queue is FIFO, in-memory.
+- **Response routing**: a single `lastChatId` field routes all command responses (status, stats, bash output, model lists, last message). `deleteInProgress` flag (boolean) — not a separate chat ID — triggers delete-specific logic on `get_state` responses alongside normal status display. 
 - **Pi restart on crash**: `exit`/`error` handler spawns a new pi process after 1s delay.
 - **Error bubbling**: Pi errors that produce no stream content surface to the Telegram user by editing the placeholder message. If no placeholder was created (model rejects before any assistant `message_start`), the error is sent as a new `sendMessage`. `piErrorSent` flag prevents double-surfacing across `message_end` + `agent_end`.
 - **Verbosity**: `-v` = key events/states + error context, `-vv` = + `sendPi` raw + telegram msg summary (`{userId, chatId, text/caption}` — NOT full `ctx.msg`), `-vvv` = + full event JSON + raw stdout lines. Pi errors always logged to stderr regardless. Note: `-vvv` does not log the full Telegram `ctx.msg` object — it only logs selected fields (userId, chatId, text/caption).
