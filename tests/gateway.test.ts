@@ -820,6 +820,8 @@ describe("Gateway.showDaemonStatus", () => {
     expect(messages[0]!.text).toContain("not connected");
     expect(messages[0]!.text).toContain("idle");
     expect(messages[0]!.text).toContain("Queue depth:");
+    expect(messages[0]!.text).toContain("Session:");
+    expect(messages[0]!.text).toContain("Cached sessions:");
   });
 
   it("shows running Pi with pid when piClient is connected", async () => {
@@ -865,6 +867,54 @@ describe("Gateway.showDaemonStatus", () => {
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.text).toContain("Queue depth:  3");
+  });
+
+  it("shows session ID short form when currentSessionId is set", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.currentSessionId = "01999999-aaaa-bbbb-cccc-ddddeeeeffff";
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("Session:");
+    expect(messages[0]!.text).toContain("dddeeeeffff");
+  });
+
+  it("shows 'none' when no currentSessionId", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("Session:      none");
+  });
+
+  it("shows cached sessions count from sessionPicker.size", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.sessionPicker.set("a", { path: "/a.jsonl", id: "a", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
+    gateway.sessionPicker.set("b", { path: "/b.jsonl", id: "b", created: "2026-01-01T00:00:00.000Z", mtime: 2 });
+    gateway.sessionPicker.set("c", { path: "/c.jsonl", id: "c", created: "2026-01-01T00:00:00.000Z", mtime: 3 });
+
+    await gateway.showDaemonStatus(1);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("Cached sessions:");
+    expect(messages[0]!.text).toContain("Cached sessions: 3");
   });
 
 });

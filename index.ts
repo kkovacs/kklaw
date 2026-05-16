@@ -489,6 +489,8 @@ export class Gateway {
       `⏱️ Uptime:        ${uptimeStr}`,
       `🔄 Pi:           ${piStatus}`,
       `📡 Pi streaming: ${streaming}`,
+      `📁 Session:      ${this.currentSessionId ? this.currentSessionId.slice(-12) : "none"}`,
+      `📑 Cached sessions: ${this.sessionPicker.size}`,
       `📋 Queue depth:  ${this.queue.length}`,
     ];
     const text = `<pre>${lines.join("\n")}</pre>`;
