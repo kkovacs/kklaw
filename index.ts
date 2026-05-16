@@ -782,6 +782,7 @@ export class Gateway {
 // ============================================================
 
 if (import.meta.main) {
+  (async () => {
   if (!TOKEN) {
     console.error("FATAL: TELEGRAM_BOT_TOKEN not set");
     process.exit(1);
@@ -1052,4 +1053,5 @@ if (import.meta.main) {
     drop_pending_updates: true,
     onStart: () => console.log("kklaw gateway started"),
   });
+  })();
 }

@@ -39,9 +39,26 @@ No extra infrastructure. Just Unix and the filesystem.
 ## Quick start
 
 ```bash
+# 1. Install Pi (see https://pi.dev)
+curl -fsSL https://pi.dev/install.sh | sh
+
+# 2. Install bun (see https://bun.com)
+curl -fsSL https://bun.com/install | bash
+
+# 3. Clone kklaw
+git clone https://github.com/kkovacs/kklaw
+cd kklaw
+
+# 4. Install deps and configure
 cp .env.example .env   # set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID
 bun install
+
+# 5/a. Run kklaw
 bun run index.ts
+
+# 5/b. Or build a standalone binary:
+bun build ./index.ts --compile --minify --bytecode --outfile kklaw
+./kklaw
 ```
 
 ## Configuration (`.env`)
