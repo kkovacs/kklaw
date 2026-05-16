@@ -836,6 +836,23 @@ if (import.meta.main) {
     await ctx.reply("🆕 New session.");
   });
 
+  bot.command("abort", async (ctx) => {
+    dbg(1, "/abort");
+    gateway.currentRelay?.cancel();
+    gateway.currentRelay = null;
+    gateway.piStreaming = false;
+    gateway.turnToolCounts.clear();
+    gateway.queue = [];
+    gateway.sendPi({ type: "abort" });
+    await ctx.reply("🛑 Aborted.");
+  });
+
+  bot.command("abort_bash", async (ctx) => {
+    dbg(1, "/abort_bash");
+    gateway.sendPi({ type: "abort_bash" });
+    await ctx.reply("🛑 Bash aborted.");
+  });
+
   bot.command("status", async (ctx) => {
     dbg(1, "/status");
     await gateway.showDaemonStatus(ctx.chatId);
@@ -994,6 +1011,8 @@ if (import.meta.main) {
 
   await bot.api.setMyCommands([
     { command: "new",       description: "Start a new session" },
+    { command: "abort",     description: "Abort the current agent turn" },
+    { command: "abort_bash",description: "Abort the running bash command" },
     { command: "status",    description: "Show daemon status (uptime, Pi state, queue)" },
     { command: "session",    description: "Show session state (model, messages, thinking)" },
 

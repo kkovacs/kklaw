@@ -115,6 +115,8 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | Telegram command | RPC command | Response |
 |------------------|-------------|----------|
 | `/new` | `new_session` → `get_state` | cancels relay + resets state; shows new session status |
+| `/abort` | `abort` | cancels relay, clears streaming state, empties queue; replies "🛑 Aborted." |
+| `/abort_bash` | `abort_bash` | replies "🛑 Bash aborted." |
 | `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping |
 | `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue |
@@ -160,9 +162,11 @@ Some providers return transient `400` errors for image prompts even when their m
 ## Pi RPC types used
 
 ```
-prompt:   { type: "prompt", message: string, images?: ImageContent[] }
-bash:     { type: "bash", command: string }
-response: { type: "response", command?: string, success: bool, error?: string, data?: unknown }
+prompt:      { type: "prompt", message: string, images?: ImageContent[] }
+bash:        { type: "bash", command: string }
+abort:       { type: "abort" }
+abort_bash:  { type: "abort_bash" }
+response:    { type: "response", command?: string, success: bool, error?: string, data?: unknown }
 ImageContent: `{ type: "image", data: string (base64), mimeType: string }`
 ModelInfo (subset used): `{ id, name, provider, contextWindow, input[], cost: { input, output } }`
 ```
