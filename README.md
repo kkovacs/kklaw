@@ -1,22 +1,14 @@
 # There are many personal agents, but this one is _mine_. 😀
 
-**Chat with Pi through Telegram.** A minimalist [grammy](https://grammy.dev) bot that bridges Telegram to a [Pi](https://pi.dev) coding agent running in RPC mode — streaming responses, managing sessions, all from your phone.
+**Lightweight gateway to connect Pi to Telegram**
+
+A tiny [grammy](https://grammy.dev) bot that connects your Telegram to your [Pi](https://pi.dev) agent running in RPC mode. Supports switching Pi sessions directly from your phone to keep context focused. Supports tasking your Pi agent from normal `cron` or `at`, inside the active context so you can follow up.
 
 ## Philosophy
 
-kklaw is small on purpose. Like Pi itself, it is tightly scoped and does not intend to grow beyond the **"One user. One DM. One Pi."** model. No multi-user, no group chats. Just you and your Pi agent harness.
+kklaw is intentionally minimal. It is strictly **"One user. One chat. One Pi."** — no multi-user support, no group chats. Just a direct, private connection between you and your Pi agent, any way you configured that up. Full π. No checks or balances. Zero friction. Zero separaton. _Absolute power!_ 💪
 
-**IMPORTANT!** The security model is strictly a one-person, one-channel use. No group chats. No checks and balances. Zero separaton. _Absolute power!_
-
-It connects to Pi via RPC, not as an embedded library. You **bring your own Pi** — however you've configured it, whatever provider and model you've chosen, whatever session setup you prefer. kklaw doesn't care. It speaks the RPC protocol and stays out of your way.
-
-It is **not a Pi extension**. Extensions run inside Pi's process and share its session lifecycle. kklaw runs independently so it can control session routing. You can connect to multiple Pi sessions from the same Telegram chat and switch between them — talk to your personal assistant in one session, work on code in another, keep them separate. That is the whole reason this exists as a standalone gateway instead of a Pi extension.
-
-Every argument after `--` is passed through to the Pi process:
-
-```bash
-bun run index.ts -v -- -c
-```
+You also get to run bash from Telegram like `!rm -rf /` 😅
 
 ## Inject / automation
 
@@ -36,6 +28,12 @@ No extra infrastructure. Just Unix and the filesystem.
 0 8 * * * echo "Summarize my calendar and unread emails" > ~/.pi/agent/injects/morning.txt
 ```
 
+## How It Works
+
+kklaw starts the `pi` binary rather than running it as an embedded library. This lets you bring your own Pi instance — any extensions, skills, configuration — and kklaw acts as a lightweight bridge to Telegram.
+
+It uses RPC specifically to enable **session switching**. Unlike Pi extensions (which run inside Pi and are locked to one session), kklaw lets you route between multiple Pi sessions from the same Telegram chat. This allows you to maintain focused contexts or keep different tasks (e.g., personal assistant vs. project work) cleanly separated.
+
 ## Quick start
 
 ```bash
@@ -50,15 +48,21 @@ git clone https://github.com/kkovacs/kklaw
 cd kklaw
 
 # 4. Install deps and configure
-cp .env.example .env   # set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_ID
+cp .env.example .env   # Set TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID and an LLM for Pi
 bun install
 
-# 5/a. Run kklaw
+# 5/a. Either run kklaw with bun:
 bun run index.ts
 
 # 5/b. Or build a standalone binary:
 bun build ./index.ts --compile --minify --bytecode --outfile kklaw
 ./kklaw
+```
+
+Every argument after `--` is passed through to the Pi process that gets started, for example, to always continue the previous session:
+
+```bash
+bun run index.ts -v -- -c
 ```
 
 ## Configuration (`.env`)
@@ -89,12 +93,19 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `/delete` | Delete the current session and start fresh |
 | `/quit` | Stop the gateway |
 
-Send a prompt (text, photo, or document) to talk to Pi. Prefix with `!` to run a shell command instead — e.g. `!ls -la`.
+All other slash commands are passed down to Pi.
 
-## Commands
+Send a file (text, photo, or document) and it will passed to your LLM, and optionally saved. (That way you can ask your LLM to operate on it, even if it does not understand the file directly.)
 
-```bash
-bun install        # install dependencies
-bun run index.ts   # start the gateway
-bun test           # run tests
-```
+Prefix with `!` to run a shell command instead — e.g. `!ls -l ~/.pi/agent/uploads/`.
+
+## Other amazing projects similar to this one (that I tried)
+
+Pi extensions (**can't** switch sessions):
+
+- https://github.com/badlogic/pi-telegram - Mario's (author of Pi) original extension
+- https://github.com/llblab/pi-telegram - The maintained version of the above
+
+Gateway-style (**can** switch sessions):
+
+- https://github.com/benedict2310/TelePi - Benedict's gateway, very similar to mine _(he came first)_, not as minimalist. Voice, screenshots, handoff!
