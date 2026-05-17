@@ -478,7 +478,7 @@ export class Gateway {
     this.currentSessionId = null;
   }
 
-  scanRecentSessions(limit: number = 8, sessionDir?: string): SessionInfo[] {
+  scanRecentSessions(limit: number = 12, sessionDir?: string): SessionInfo[] {
     const dir = sessionDir ?? SESSION_DIR;
     dbg(1, `scanRecentSessions dir=${dir}`);
 
