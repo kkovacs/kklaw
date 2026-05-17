@@ -89,12 +89,14 @@ For example, juggling multiple sessions:
 There are two ways to send files in Telegram:
 
 1. Send _"as a photo"_ and `kklaw` will directly pass it to Pi (and also save to `UPLOAD_DIR` if set).
+
    ("Photo" icon in the Telegram app, _"send in a quick way"_ in Telegram web.)
 
-2. Send any file (even images) _"as a document"_ and `kklaw` will saved it to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
+2. Send any file (even images) _"as a document"_ and `kklaw` will save it to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
+
    ("Document" icon in the Telegram app, _"send without compression"_ in Telegram web).
 
-Prefix text with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
+Use `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
 
 Currently there is no way for Pi to send files back to Telegram. If you need that, use `git` sync (see below), tell the LLM to send files to you via email, or to run `timeout 30 -- python -m http.server` with Tailscale, or anything. :)
 
