@@ -2000,3 +2000,181 @@ describe("extFromMime", () => {
     expect(extFromMime("no-slash")).toBe(".bin");
   });
 });
+
+describe("Gateway.injectPrompt", () => {
+  it("starts a session when pi is idle", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    // pi idle, currentChatId is set
+    gateway.currentChatId = 456;
+    gateway.injectPrompt("injected prompt text", "test.txt");
+
+    expect(gateway.piStreaming).toBe(true);
+    expect(gateway.currentChatId).toBe(456);
+    expect(piCommands).toEqual([{ type: "prompt", message: "injected prompt text" }]);
+  });
+
+  it("falls back to allowedUserId when currentChatId is 0", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    // currentChatId defaults to 0
+    gateway.injectPrompt("prompt text", "test.txt");
+
+    expect(gateway.currentChatId).toBe(8476228873);
+    expect(piCommands).toEqual([{ type: "prompt", message: "prompt text" }]);
+  });
+
+  it("queues the message when pi is busy", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    gateway.piStreaming = true;
+    gateway.currentChatId = 789;
+
+    gateway.injectPrompt("queued prompt", "test.txt");
+
+    expect(gateway.queue.length).toBe(1);
+    expect(gateway.queue[0]).toEqual({ chatId: 789, text: "queued prompt" });
+    // sendPi was NOT called
+    expect(piCommands.length).toBe(0);
+  });
+
+  it("appends to existing queue when busy", () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    gateway.piStreaming = true;
+    gateway.currentChatId = 999;
+    gateway.queue.push({ chatId: 999, text: "first" });
+
+    gateway.injectPrompt("second", "test.txt");
+
+    expect(gateway.queue.length).toBe(2);
+    expect(gateway.queue[0]).toEqual({ chatId: 999, text: "first" });
+    expect(gateway.queue[1]).toEqual({ chatId: 999, text: "second" });
+    expect(piCommands.length).toBe(0);
+  });
+});
+
+describe("Gateway.handleTextMessage (! commands)", () => {
+  it("sends bash RPC for !command", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockContext({ msg: { text: "!ls" } });
+    await gateway.handleTextMessage(ctx, api);
+
+    expect(piCommands).toEqual([{ type: "bash", command: "ls" }]);
+    // Does NOT set piStreaming
+    expect(gateway.piStreaming).toBe(false);
+  });
+
+  it("trims whitespace from !command", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockContext({ msg: { text: "!  echo hello  " } });
+    await gateway.handleTextMessage(ctx, api);
+
+    expect(piCommands).toEqual([{ type: "bash", command: "echo hello" }]);
+    expect(gateway.piStreaming).toBe(false);
+  });
+
+  it("preserves full command string after ! prefix", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockContext({ msg: { text: "!echo hello world with spaces" } });
+    await gateway.handleTextMessage(ctx, api);
+
+    expect(piCommands).toEqual([{ type: "bash", command: "echo hello world with spaces" }]);
+  });
+
+  it("replies with usage when ! has no command", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const replies: Array<{ text: string; other?: Record<string, unknown> }> = [];
+    const ctx = mockContext({
+      msg: { text: "!" },
+      reply: async (text: string, other?: Record<string, unknown>) => {
+        replies.push({ text, other });
+      },
+    });
+
+    await gateway.handleTextMessage(ctx, api);
+
+    expect(replies.length).toBe(1);
+    expect(replies[0].text).toContain("Usage");
+    expect(replies[0].other).toEqual({ parse_mode: "HTML" });
+    expect(piCommands.length).toBe(0);
+  });
+
+  it("replies with usage when ! is only whitespace", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const replies: Array<{ text: string }> = [];
+    const ctx = mockContext({
+      msg: { text: "!   " },
+      reply: async (text: string) => {
+        replies.push({ text });
+      },
+    });
+
+    await gateway.handleTextMessage(ctx, api);
+
+    expect(replies.length).toBe(1);
+    expect(piCommands.length).toBe(0);
+  });
+
+  it("rejects !command from unauthorized user", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 999, api });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockContext({ from: { id: 111 }, msg: { text: "!rm -rf /" } });
+    await gateway.handleTextMessage(ctx, api);
+
+    // Unauthorized — no sendPi, no queue
+    expect(piCommands.length).toBe(0);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("!command bypasses busy queue (always fires immediately)", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.piStreaming = true; // simulate busy
+
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+
+    const ctx = mockContext({ msg: { text: "!df -h" } });
+    await gateway.handleTextMessage(ctx, api);
+
+    // Bash commands bypass the queue regardless of stream state
+    expect(piCommands).toEqual([{ type: "bash", command: "df -h" }]);
+    expect(gateway.queue.length).toBe(0);
+  });
+});
