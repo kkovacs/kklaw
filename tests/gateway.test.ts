@@ -376,7 +376,7 @@ describe("Gateway.handlePiEvent", () => {
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
 
-    expect(sent).toEqual(["🔧 bash..."]);
+    expect(sent).toEqual(["🔧 <code>bash</code>..."]);
     expect(gateway.toolMessages.get("call_1")!.msgId).toBe(200);
   });
 
@@ -394,8 +394,8 @@ describe("Gateway.handlePiEvent", () => {
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "edit", toolCallId: "call_2", args: { path: "/home/user/app.ts" } });
 
     expect(sent).toEqual([
-      "🔧 write: /home/user/src/config.yaml",
-      "🔧 edit: /home/user/app.ts",
+      "🔧 <code>write</code> /home/user/src/config.yaml",
+      "🔧 <code>edit</code> /home/user/app.ts",
     ]);
   });
 
@@ -412,9 +412,9 @@ describe("Gateway.handlePiEvent", () => {
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "read", toolCallId: "call_1", args: { path: "/home/user/really/deeply/nested/project/src/config.yaml" } });
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_2", args: { command: "python3 -c \"import sys; import json; import os; import pathlib; data = json.loads(open('/tmp/conf.json').read()); print(data)\"" } });
 
-    expect(sent[0]).toBe("🔧 read: …user/really/deeply/nested/project/src/config.yaml");
-    expect(sent[1]!.startsWith("🔧 bash: python3 -c \"import sys; import json; import os; import path")).toBe(true);
-    expect(sent[1]!.length).toBeLessThanOrEqual(80);
+    expect(sent[0]).toBe("🔧 <code>read</code> …user/really/deeply/nested/project/src/config.yaml");
+    expect(sent[1]!.startsWith("🔧 <code>bash</code> python3 -c \"import sys; import json; import os; import path")).toBe(true);
+    expect(sent[1]!.length).toBeLessThanOrEqual(85);
   });
 
   it("tool_execution_start shows first line only for multiline bash", async () => {
@@ -429,7 +429,7 @@ describe("Gateway.handlePiEvent", () => {
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1", args: { command: "cd /tmp\nls -la\nrm -f *.log" } });
 
-    expect(sent).toEqual(["🔧 bash: cd /tmp"]);
+    expect(sent).toEqual(["🔧 <code>bash</code> cd /tmp"]);
   });
 
   it("tool_execution_start falls back for unknown tools", async () => {
@@ -444,7 +444,7 @@ describe("Gateway.handlePiEvent", () => {
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "grep", toolCallId: "call_1" });
 
-    expect(sent).toEqual(["🔧 grep..."]);
+    expect(sent).toEqual(["🔧 <code>grep</code>..."]);
   });
 
   it("tool_execution_end edits the status message", async () => {
@@ -464,7 +464,7 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(edits.length).toBe(1);
     expect(edits[0]!.msgId).toBe(300);
-    expect(edits[0]!.text).toBe("✅ bash...");
+    expect(edits[0]!.text).toBe("✅ <code>bash</code>...");
   });
 
   it("parallel tools get independent status messages", async () => {
@@ -486,7 +486,7 @@ describe("Gateway.handlePiEvent", () => {
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "read", toolCallId: "call_2" });
 
-    expect(sent).toEqual(["🔧 bash...", "🔧 read..."]);
+    expect(sent).toEqual(["🔧 <code>bash</code>...", "🔧 <code>read</code>..."]);
     expect(gateway.toolMessages.get("call_1")!.msgId).toBe(401);
     expect(gateway.toolMessages.get("call_2")!.msgId).toBe(402);
 
@@ -495,9 +495,9 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(edits.length).toBe(2);
     expect(edits[0]!.msgId).toBe(401);
-    expect(edits[0]!.text).toBe("✅ bash...");
+    expect(edits[0]!.text).toBe("✅ <code>bash</code>...");
     expect(edits[1]!.msgId).toBe(402);
-    expect(edits[1]!.text).toBe("✅ read...");
+    expect(edits[1]!.text).toBe("✅ <code>read</code>...");
   });
 
   it("tool_execution_start does nothing when currentChatId is 0", async () => {

@@ -375,11 +375,12 @@ export class Gateway {
         this.turnToolCounts.set(toolName, (this.turnToolCounts.get(toolName) ?? 0) + 1);
         if (this.currentChatId) {
           const preview = toolArgPreview(toolName, args as Record<string, unknown> | undefined);
+          const tn = htmlEscape(toolName);
           const text = preview
-            ? `🔧 ${toolName}: ${preview}`
-            : `🔧 ${toolName}...`;
+            ? `🔧 <code>${tn}</code> ${preview}`
+            : `🔧 <code>${tn}</code>...`;
           try {
-            const sent = await this.api.sendMessage(this.currentChatId, text);
+            const sent = await this.api.sendMessage(this.currentChatId, text, { parse_mode: "HTML" });
             if (toolCallId) this.toolMessages.set(toolCallId, { msgId: sent.message_id, startText: text });
           } catch (err) {
             dbg(1, `[telegram] send tool start failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -399,6 +400,7 @@ export class Gateway {
             this.currentChatId,
             entry.msgId,
             entry.startText.replace("🔧", "✅"),
+            { parse_mode: "HTML" },
           ).catch((err: Error) => {
             dbg(1, `[telegram] edit tool end failed: ${err.message}`);
           });
@@ -546,6 +548,7 @@ export class Gateway {
       `📁 Session:      ${this.currentSessionId ? this.currentSessionId.slice(-12) : "none"}`,
       `📑 Cached sessions: ${this.sessionPicker.size}`,
       `📋 Queue depth:  ${this.queue.length}`,
+      `🔧 Active tools: ${this.toolMessages.size}`,
     ];
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
