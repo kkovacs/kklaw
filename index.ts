@@ -194,6 +194,10 @@ export class Gateway {
       const resp = event as PiResponse;
       if (!resp.success) {
         console.error(`[pi] error (${resp.command}): ${resp.error}`);
+        if (resp.command === "compact" && this.lastChatId) {
+          this.api.sendMessage(this.lastChatId, `❌ Compaction failed: ${resp.error ?? "unknown error"}`)
+            .catch((err: Error) => console.error(`[telegram] compact error failed: ${err.message}`));
+        }
       } else {
         dbg(1, `pi response ok: ${resp.command}`);
         if (resp.command === "new_session") {

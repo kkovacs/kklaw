@@ -1667,6 +1667,23 @@ describe("Gateway.handlePiEvent command routing", () => {
 
     expect(called).toBe(false);
   });
+
+  it("sends error message on failed compact response", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"compact","success":false,"error":"Already compacted"}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe("❌ Compaction failed: Already compacted");
+  });
 });
 
 describe("Integration: replay command responses", () => {
