@@ -179,7 +179,7 @@ I use [🌳VMTREE](https://github.com/kkovacs/vmtree) for a self-hosted, minimal
 
 I run Pi in a "workspace" directory that is a `git` repo it can push/pull, and I have [working copy](https://workingcopyapp.com/) on my devices to see the same files. (I tried [Obsidian](https://obsidian.md/) too, but `git` sync was convoluted and error-prone.)
 
-On the VM:
+Tips for the VM:
 
 ```bash
 # From Ubuntu
@@ -196,7 +196,7 @@ curl -LO https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.d
 cat > .pi/SYSTEM.md <<EOF
 You are Alfred, a helpful personal assistant to Batman.
 You have uv and bun. You can use Chrome via <https://bun.com/docs/runtime/webview>
-Please git pull/push the workspace when making changes.
+You git pull/push the workspace when making changes.
 EOF
 ```
 
