@@ -213,6 +213,9 @@ export class Gateway {
         if (resp.command === "get_last_assistant_text" && this.lastChatId) {
           this.showLastMessage(this.lastChatId, resp.data);
         }
+        if (resp.command === "compact" && this.lastChatId) {
+          this.showCompact(this.lastChatId, resp.data);
+        }
         if (resp.command === "get_available_models" && this.lastChatId) {
           this.showModels(this.lastChatId, resp.data);
         }
@@ -666,6 +669,19 @@ export class Gateway {
     }
   }
 
+  async showCompact(chatId: number | string, data: unknown): Promise<void> {
+    const d = data as { tokensBefore?: number } | undefined;
+    const tok = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+    const lines = ["🗜️ Compacted"];
+    if (d?.tokensBefore != null) {
+      lines.push(`📥 Context before: ${tok(d.tokensBefore)} tokens`);
+    }
+    const text = `<pre>${lines.join("\n")}</pre>`;
+    await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
+      console.error(`[telegram] showCompact failed: ${err.message}`),
+    );
+  }
+
   async showStats(chatId: number | string, data: unknown): Promise<void> {
     const s = data as Record<string, unknown> | undefined;
     if (!s) return;
@@ -1036,6 +1052,14 @@ if (import.meta.main) {
     gateway.sendPi({ type: "get_available_models" });
   });
 
+  bot.command("compact", async (ctx) => {
+    dbg(1, "/compact");
+    const customInstructions = ctx.match?.trim();
+    const cmd: Record<string, unknown> = { type: "compact" };
+    if (customInstructions) cmd.customInstructions = customInstructions;
+    gateway.sendPi(cmd);
+  });
+
   bot.callbackQuery(/^model:(.+)$/, async (ctx) => {
     const data = ctx.match?.[1];
     if (!data) return;
@@ -1087,6 +1111,7 @@ if (import.meta.main) {
     { command: "model",     description: "List / filter available models, or switch model" },
     { command: "abort_bash",description: "Abort the running bash command" },
     { command: "quit",      description: "Exit the daemon" },
+    { command: "compact",   description: "Compact conversation context to reduce token usage" },
   ]).catch((err: Error) => {
     console.error(`[cmd] setMyCommands failed: ${err.message}`);
   });

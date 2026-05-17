@@ -169,6 +169,7 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `/session` | Show Pi session status and stats |
 | `/abort` | Abort the current agent turn (including tools) |
 | `/abort_bash` | Abort a running `!` bash command |
+| `/compact [focus]` | Compact conversation context (optional focus instructions) |
 | `/quit` | Stop the gateway |
 
 All other slash commands are passed down to Pi. (To use skills, etc.) All errors are passed up to you on Telegram.

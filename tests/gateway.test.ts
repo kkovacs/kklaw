@@ -915,6 +915,64 @@ describe("Gateway.showStatus", () => {
   });
 });
 
+describe("Gateway.showCompact", () => {
+  it("formats compact response as HTML <pre> with tokensBefore", async () => {
+    const messages: { text: string; other?: Record<string, unknown> }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text, other) => { messages.push({ text, other }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showCompact(456, { tokensBefore: 150000 });
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("🗜️ Compacted");
+    expect(messages[0]!.text).toContain("📥 Context before: 150.0K tokens");
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+  });
+
+  it("formats tokensBefore with M suffix for large counts", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showCompact(1, { tokensBefore: 2_500_000 });
+
+    expect(messages[0]!.text).toContain("2.5M tokens");
+  });
+
+  it("omits tokensBefore line when not present in data", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showCompact(1, {});
+
+    expect(messages[0]!.text).toBe("<pre>🗜️ Compacted</pre>");
+  });
+
+  it("omits tokensBefore line when data is undefined", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showCompact(1, undefined);
+
+    expect(messages[0]!.text).toBe("<pre>🗜️ Compacted</pre>");
+  });
+});
+
 describe("Gateway.showStats", () => {
   it("formats get_session_stats response as HTML <pre> and sends message", async () => {
     const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
@@ -1570,6 +1628,41 @@ describe("Gateway.handlePiEvent command routing", () => {
 
     gateway.handlePiEvent(JSON.parse(`
       {"type":"response","command":"bash","success":true,"data":{"output":"hi","exitCode":0}}
+    `));
+
+    expect(called).toBe(false);
+  });
+
+  it("routes compact response to showCompact when lastChatId is set", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 789;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"compact","success":true,"data":{"tokensBefore":120000}}
+    `));
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toContain("<pre>");
+    expect(messages[0]!.text).toContain("🗜️ Compacted");
+    expect(messages[0]!.text).toContain("120.0K tokens");
+  });
+
+  it("does NOT route compact response when lastChatId is 0", async () => {
+    let called = false;
+    const api: TelegramApi = {
+      sendMessage: async () => { called = true; return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 0;
+
+    gateway.handlePiEvent(JSON.parse(`
+      {"type":"response","command":"compact","success":true,"data":{"tokensBefore":5000}}
     `));
 
     expect(called).toBe(false);
