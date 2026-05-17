@@ -66,6 +66,22 @@ export interface DocumentMessageContext {
   react(emoji: string): Promise<unknown>;
 }
 
+export function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export function isParseError(err: unknown): boolean {
+  const msg = errMessage(err).toLowerCase();
+  return (
+    msg.includes("can't parse entities") ||
+    msg.includes("unsupported start tag") ||
+    msg.includes("unexpected end tag") ||
+    msg.includes("entity name expected") ||
+    msg.includes("parse entities") ||
+    msg.includes("can't parse message text")
+  );
+}
+
 export function createSafeEditor(
   api: TelegramApi,
   chatId: number | string,
@@ -77,24 +93,8 @@ export function createSafeEditor(
   let frozenLength = 0;
   const mdOpts = { parse_mode: "MarkdownV2" as const };
 
-  function errMessage(err: unknown): string {
-    return err instanceof Error ? err.message : String(err);
-  }
-
   function isNotModifiedError(err: unknown): boolean {
     return errMessage(err).includes("message is not modified");
-  }
-
-  function isParseError(err: unknown): boolean {
-    const msg = errMessage(err).toLowerCase();
-    return (
-      msg.includes("can't parse entities") ||
-      msg.includes("unsupported start tag") ||
-      msg.includes("unexpected end tag") ||
-      msg.includes("entity name expected") ||
-      msg.includes("parse entities") ||
-      msg.includes("can't parse message text")
-    );
   }
 
   function isTooLongError(err: unknown): boolean {

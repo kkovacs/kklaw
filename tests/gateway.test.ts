@@ -967,6 +967,22 @@ describe("Gateway.showLastMessage (/last)", () => {
 
     expect(messages.length).toBe(0);
   });
+
+  it("splits long text across multiple messages", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    const longText = "x".repeat(4100);
+    await gateway.showLastMessage(1, { text: longText });
+
+    expect(messages.length).toBe(2);
+    expect(messages[0]!.text.length).toBeLessThanOrEqual(4000);
+    expect(messages[1]!.text.length).toBeLessThanOrEqual(4000);
+  });
 });
 
 describe("Gateway.showModels", () => {

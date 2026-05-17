@@ -5,7 +5,7 @@ import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
-import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "./telegram";
+import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, isParseError, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
 
 // ============================================================
@@ -509,9 +509,21 @@ export class Gateway {
       );
       return;
     }
-    await this.api.sendMessage(chatId, escapeText(text), { parse_mode: "MarkdownV2" }).catch((err: Error) =>
-      console.error(`[telegram] showLastMessage failed: ${err.message}`),
-    );
+    const escaped = escapeText(text);
+    const chunks = splitTelegramText(escaped, 4000);
+    for (const chunk of chunks) {
+      // XXX: if this try/catch-with-plain-fallback pattern appears in more
+      // call sites, extract a sendMessageSafe() utility
+      try {
+        await this.api.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2" });
+      } catch (err) {
+        if (isParseError(err)) {
+          await this.api.sendMessage(chatId, chunk);
+        } else {
+          console.error(`[telegram] showLastMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
   }
 
   async showModels(chatId: number | string, data: unknown): Promise<void> {
