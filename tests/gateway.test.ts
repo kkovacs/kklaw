@@ -289,8 +289,8 @@ describe("Gateway.handlePiEvent", () => {
     gateway.handlePiEvent({ type: "turn_end" });
     await gateway.handlePiEvent({ type: "agent_end" });
 
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toBe("\uD83D\uDD27 5 tools used: bash \u00d73, read, write");
+    const summary = sent.find(s => s.includes("tools used"));
+    expect(summary).toBe("\uD83D\uDD27 5 tools used: bash \u00d73, read, write");
   });
 
   it("sends no tool summary when no tools were called", async () => {
@@ -332,8 +332,8 @@ describe("Gateway.handlePiEvent", () => {
 
     await gateway.handlePiEvent({ type: "agent_end" });
 
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toBe("\uD83D\uDD27 4 tools used: bash \u00d72, grep, read");
+    const summary = sent.find(s => s.includes("tools used"));
+    expect(summary).toBe("\uD83D\uDD27 4 tools used: bash \u00d72, grep, read");
   });
 
   it("clears tool counts after agent_end sends summary", async () => {
@@ -362,6 +362,192 @@ describe("Gateway.handlePiEvent", () => {
 
     gateway.resetSession("test");
     expect(gateway.turnToolCounts.size).toBe(0);
+  });
+
+  it("tool_execution_start sends per-tool status message", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
+
+    expect(sent).toEqual(["🔧 bash..."]);
+    expect(gateway.toolMessages.get("call_1")!.msgId).toBe(200);
+  });
+
+  it("tool_execution_start shows path preview for write/read/edit", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "write", toolCallId: "call_1", args: { path: "/home/user/src/config.yaml" } });
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "edit", toolCallId: "call_2", args: { path: "/home/user/app.ts" } });
+
+    expect(sent).toEqual([
+      "🔧 write: /home/user/src/config.yaml",
+      "🔧 edit: /home/user/app.ts",
+    ]);
+  });
+
+  it("tool_execution_start left-trims long paths, right-trims long bash", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "read", toolCallId: "call_1", args: { path: "/home/user/really/deeply/nested/project/src/config.yaml" } });
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_2", args: { command: "python3 -c \"import sys; import json; import os; import pathlib; data = json.loads(open('/tmp/conf.json').read()); print(data)\"" } });
+
+    expect(sent[0]).toBe("🔧 read: …user/really/deeply/nested/project/src/config.yaml");
+    expect(sent[1]!.startsWith("🔧 bash: python3 -c \"import sys; import json; import os; import path")).toBe(true);
+    expect(sent[1]!.length).toBeLessThanOrEqual(80);
+  });
+
+  it("tool_execution_start shows first line only for multiline bash", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1", args: { command: "cd /tmp\nls -la\nrm -f *.log" } });
+
+    expect(sent).toEqual(["🔧 bash: cd /tmp"]);
+  });
+
+  it("tool_execution_start falls back for unknown tools", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "grep", toolCallId: "call_1" });
+
+    expect(sent).toEqual(["🔧 grep..."]);
+  });
+
+  it("tool_execution_end edits the status message", async () => {
+    const edits: { msgId: number; text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async () => ({ message_id: 300 }),
+      editMessageText: async (_c, msgId, text) => {
+        edits.push({ msgId, text });
+        return {};
+      },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
+    await gateway.handlePiEvent({ type: "tool_execution_end", toolName: "bash", toolCallId: "call_1" });
+
+    expect(edits.length).toBe(1);
+    expect(edits[0]!.msgId).toBe(300);
+    expect(edits[0]!.text).toBe("✅ bash...");
+  });
+
+  it("parallel tools get independent status messages", async () => {
+    const sent: string[] = [];
+    const edits: { msgId: number; text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => {
+        sent.push(text);
+        return { message_id: sent.length + 400 };
+      },
+      editMessageText: async (_c, msgId, text) => {
+        edits.push({ msgId, text });
+        return {};
+      },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "read", toolCallId: "call_2" });
+
+    expect(sent).toEqual(["🔧 bash...", "🔧 read..."]);
+    expect(gateway.toolMessages.get("call_1")!.msgId).toBe(401);
+    expect(gateway.toolMessages.get("call_2")!.msgId).toBe(402);
+
+    await gateway.handlePiEvent({ type: "tool_execution_end", toolName: "bash", toolCallId: "call_1" });
+    await gateway.handlePiEvent({ type: "tool_execution_end", toolName: "read", toolCallId: "call_2" });
+
+    expect(edits.length).toBe(2);
+    expect(edits[0]!.msgId).toBe(401);
+    expect(edits[0]!.text).toBe("✅ bash...");
+    expect(edits[1]!.msgId).toBe(402);
+    expect(edits[1]!.text).toBe("✅ read...");
+  });
+
+  it("tool_execution_start does nothing when currentChatId is 0", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    // no startPiSession — currentChatId stays 0
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
+
+    expect(sent.length).toBe(0);
+    expect(gateway.toolMessages.size).toBe(0);
+  });
+
+  it("tool_execution_end is no-op when toolCallId not in map", async () => {
+    const edits: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async () => ({ message_id: 1 }),
+      editMessageText: async (_c, _m, text) => { edits.push(text); return {}; },
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    await gateway.handlePiEvent({ type: "tool_execution_end", toolName: "bash", toolCallId: "nonexistent" });
+
+    expect(edits.length).toBe(0);
+  });
+
+  it("resetSession clears toolMessages", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
+    expect(gateway.toolMessages.size).toBe(1);
+
+    gateway.resetSession("test");
+    expect(gateway.toolMessages.size).toBe(0);
+  });
+
+  it("tool_execution_start still counts when currentChatId is 0", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    // no startPiSession → currentChatId = 0, no message sent
+
+    gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
+    expect(gateway.turnToolCounts.get("bash")).toBe(1);
   });
 
   it("bubbles Pi errors to Telegram when stream produces no content", async () => {

@@ -102,6 +102,24 @@ interface ModelInfo {
   cost?: { input: number; output: number };
 }
 
+function toolArgPreview(toolName: string, args: Record<string, unknown> | undefined): string | null {
+  if (!args) return null;
+  if (toolName === "write" || toolName === "read" || toolName === "edit") {
+    const path = args.path;
+    if (typeof path === "string") {
+      return path.length <= 50 ? path : "…" + path.slice(path.length - 49);
+    }
+  }
+  if (toolName === "bash") {
+    const cmd = args.command;
+    if (typeof cmd === "string") {
+      const line = cmd.split("\n")[0]!.trim();
+      return line.length <= 60 ? line : line.slice(0, 60) + "…";
+    }
+  }
+  return null;
+}
+
 // ============================================================
 // Gateway: all mutable state + business logic
 // ============================================================
@@ -120,6 +138,7 @@ export class Gateway {
   lastChatId: number | string = 0;
   currentChatId: number | string = 0;
   currentPlaceholderMessageId: number = 0;
+  toolMessages: Map<string, { msgId: number; startText: string }> = new Map();
   lastPiError?: string;
   piErrorSent = false;
   turnToolCounts: Map<string, number> = new Map();
@@ -351,9 +370,39 @@ export class Gateway {
 
     if (type === "tool_execution_start") {
       const e = event as PiEvent;
-      const toolName = e.toolName;
+      const { toolName, toolCallId, args } = e;
       if (toolName && typeof toolName === 'string') {
         this.turnToolCounts.set(toolName, (this.turnToolCounts.get(toolName) ?? 0) + 1);
+        if (this.currentChatId) {
+          const preview = toolArgPreview(toolName, args as Record<string, unknown> | undefined);
+          const text = preview
+            ? `🔧 ${toolName}: ${preview}`
+            : `🔧 ${toolName}...`;
+          try {
+            const sent = await this.api.sendMessage(this.currentChatId, text);
+            if (toolCallId) this.toolMessages.set(toolCallId, { msgId: sent.message_id, startText: text });
+          } catch (err) {
+            dbg(1, `[telegram] send tool start failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+      return;
+    }
+
+    if (type === "tool_execution_end") {
+      const e = event as PiEvent;
+      const { toolName, toolCallId } = e;
+      if (toolName && typeof toolName === 'string' && this.currentChatId) {
+        const entry = toolCallId ? this.toolMessages.get(toolCallId) : undefined;
+        if (entry) {
+          this.api.editMessageText(
+            this.currentChatId,
+            entry.msgId,
+            entry.startText.replace("🔧", "✅"),
+          ).catch((err: Error) => {
+            dbg(1, `[telegram] edit tool end failed: ${err.message}`);
+          });
+        }
       }
       return;
     }
@@ -394,6 +443,7 @@ export class Gateway {
     this.lastPiError = undefined;
     this.piErrorSent = false;
     this.currentPlaceholderMessageId = 0;
+    this.toolMessages.clear();
 
     const cmd: Record<string, unknown> = { type: "prompt", message: text };
     if (images && images.length > 0) cmd.images = images;
@@ -414,6 +464,7 @@ export class Gateway {
     this.currentRelay = null;
     this.piStreaming = false;
     this.turnToolCounts.clear();
+    this.toolMessages.clear();
     this.queue = [];
     this.currentChatId = 0;
     this.currentPlaceholderMessageId = 0;
