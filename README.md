@@ -20,7 +20,7 @@ This is the hook for automation. Some ideas:
 
 - **Simulate HEARTBEAT** — in the _main session_ so you can ask the LLM about it _(I'm looking at you, Hermes)_
 - **Scheduled wake-ups** — Skill your LLM with `at` and `kklaw` inject, and tell it to "do this in 45 minutes"
-- **Email triage** — fetch mails from cron but wake the LLM _only_ if there was any
+- **Email triage** — fetch mails from cron but wake the LLM _only_ if there were any, so save money
 - **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
 - **Log monitor** — with a `tail -f` a `grep` and a redirect, you can wake your agent when something happens
 - **Webhooks** — make a tiny script that writes the webhook payload to the inject directory
@@ -66,7 +66,7 @@ For example, juggling multiple sessions:
 
 ```
 ── Session "evil plan" ──
- Agent: So, should I execute our evil plan?
+ Agent: Sir, should I execute our evil plan?
   User: /new                       ← start a fresh session, shelving this one
 ── Session "new" (unnamed) ──
   User: By the way, what's 300 feet to km?
@@ -153,11 +153,11 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `/abort_bash` | Abort a running `!` bash command |
 | `/quit` | Stop the gateway |
 
-All other slash commands are passed down to Pi. All errors are passed up to you on Telegram.
+All other slash commands are passed down to Pi. (To use skills, etc.) All errors are passed up to you on Telegram.
 
-Send any photo or file and it will be passed down to the LLM, and also saved (if `UPLOAD_DIR` is set. That way you can ask your LLM to operate on the file, even if it does not understand the file directly.)
+Send a photo and it will be passed to the LLM directly, and also saved to `UPLOAD_DIR` if set. Send a document (any file) and it will be saved to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
 
-Prefix with `!` to run a shell command — e.g. `!ls -l ~/.pi/agent/uploads/`. Your LLM sees the output on the next turn.
+Prefix with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
 
 ## Other amazing projects similar to this one (that I tried)
 
@@ -169,3 +169,7 @@ Pi extensions (**can't** switch sessions):
 Gateway-style (**can** switch sessions):
 
 - https://github.com/benedict2310/TelePi - Benedict's gateway, similar to mine _(he came first)_, better name, more features: Voice, screenshots, handoff! Try it!
+
+Daddy:
+
+- https://pi.dev/ - Great thanks to Mario Zechner and the Vienna gang for Pi, OpenClaw, etc: none of this would be possible without them.
