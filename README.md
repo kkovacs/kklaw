@@ -1,26 +1,26 @@
 # There are many personal agents, but this one is _mine_. 🫡
 
-**Lightweight gateway to connect Pi to Telegram**
+**Lightweight gateway to connect a [Pi / π](https://pi.dev) CLI to Telegram**
 
-A tiny self-hosted Telegram bot to talk to your [Pi](https://pi.dev) AI agent harness. Supports switching Pi sessions directly from your phone to keep context on leash. Supports tasking Pi from shell (normal `cron` or `at`) inside the main context so you can follow up.
+A tiny self-hosted Telegram bot to talk to your Pi AI agent harness. Supports switching Pi sessions directly from your phone to keep context on leash. Supports tasking Pi from shell (normal `cron` or `at`) inside the main context so you can follow up.
 
 ## Philosophy
 
 💅`kklaw` is _intentionally_ minimal, like Pi itself. I'm actively removing any feature that can be done easier by `bash` or by the LLM.
 
-It is strictly **"One user. One chat. One Pi."** — there will never be multi-user support or group chats. Just a direct, private connection between you and your Pi agent, any way you configured that up. Full π. No checks or balances. Zero friction. Zero separaton. _Absolute power!_ 💪
+It is strictly **"One user. One chat. One Pi."** — there will never be multi-user support or group chats. Just a direct, private connection between you and your Pi agent, any way you configured that up. Full π. No checks or balances. Zero friction. Zero separation. _Absolute power!_ 💪
 
 You also get to run bash commands from Telegram like `!rm -rf /` 😅
 
 ## Inject / automation
 
-There is no embedded cron, no scheduler — use Unix `cron`, `at`, or whatever you already have. `kklaw` watches an **inject directory** (`INJECT_DIR`). Any script can drop a text file into that directory, and `kklaw` will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
+There is no embedded cron, no scheduler — use Unix `cron`, `at`, or what you already have. `kklaw` watches an **inject directory** (`INJECT_DIR`). Any script can drop a text file into that directory, and `kklaw` will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
 
-This is the hook for automation. Some ideas:
+This is the hook for automation. Some use cases for the lazy and brilliant:
 
 - **Simulate HEARTBEAT** — in the _main session_ so you can ask the LLM about it _(I'm looking at you, Hermes)_
 - **Scheduled wake-ups** — Skill your LLM with `at` and `kklaw` inject, and tell it to "do this in 45 minutes"
-- **Email triage** — fetch mails from cron but wake the LLM _only_ if there were any, so save money
+- **Email triage** — fetch mails from cron but wake the LLM _only_ if there were any, to save money
 - **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
 - **Log monitor** — with a `tail -f` a `grep` and a redirect, you can wake your agent when something happens
 - **Webhooks** — make a tiny script that writes the webhook payload to the inject directory
@@ -33,13 +33,13 @@ No extra features. Just you and the filesystem.
 0 8 * * * echo "Summarize my calendar and unread emails" > ~/.pi/agent/injects/morning.txt
 
 # OpenClaw-style HEARTBEAT
-*/15 * * * * echo "Please do HEARTBEAT.md" > ~/.pi/agent/injects/heartbeat.txt
+*/15 * * * * echo "Please execute HEARTBEAT.md" > ~/.pi/agent/injects/heartbeat.txt
 
-# Example: Wake the LLM only if incoming email, only in daytime
-*/5 8-20 * * * fetchmail && echo "Read the emails!" > ~/.pi/agent/injects/emails.txt
+# Example: Wake the LLM only if incoming email, only daytime
+*/5 8-20 * * * fetchmail && echo "We've got email!" > ~/.pi/agent/injects/emails.txt
 ```
 
-If you have `apt install at` (how could they ever remove `at` from the default install? I'm sure it's `systemd`'s fault somehow):
+If you have Unix `at` (`apt install at` - how could they ever remove `at` from the default install? 😭 I'm sure it's `systemd`'s fault somehow.):
 
 ```bash
 at now + 10 minutes <<EOF
@@ -155,7 +155,7 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 
 All other slash commands are passed down to Pi. (To use skills, etc.) All errors are passed up to you on Telegram.
 
-Send a photo and it will be passed to the LLM directly, and also saved to `UPLOAD_DIR` if set. Send a document (any file) and it will be saved to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
+Two ways to send files: Send _"as a photo"_ and it will be directly passed to the LLM (and also saved to `UPLOAD_DIR` if set). But send any file (even images) _"as a document"_ and it will only be saved to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
 
 Prefix with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
 
