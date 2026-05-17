@@ -55,6 +55,8 @@ export function createPiClient(options: {
     options.onError?.(err);
   });
 
+  let eventQueue = Promise.resolve();
+
   attachJsonlReader(proc.stdout!, (line: string) => {
     options.onLine?.(line);
     let event: unknown;
@@ -64,7 +66,9 @@ export function createPiClient(options: {
       console.error(`[pi] malformed JSON line: ${line.slice(0, 200)}`);
       return;
     }
-    options.onEvent(event);
+    eventQueue = eventQueue.then(() => (options.onEvent(event) as Promise<void> | undefined)?.catch((err: Error) => {
+      console.error(`[pi] event handler error: ${err.message}`);
+    }));
   });
 
   return {
