@@ -157,9 +157,19 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 
 All other slash commands are passed down to Pi. (To use skills, etc.) All errors are passed up to you on Telegram.
 
-Two ways to send files: Send _"as a photo"_ and it will be directly passed to the LLM (and also saved to `UPLOAD_DIR` if set). But send any file (even images) _"as a document"_ and it will only be saved to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
+## Sending files
 
-Prefix with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
+There are two ways to send files in Telegram:
+
+1. Send _"as a photo"_ and `kklaw` will directly pass it to Pi (and also save to `UPLOAD_DIR` if set).
+   ("Photo" icon in the Telegram app, _"send in a quick way"_ in Telegram web.)
+
+2. Send any file (even images) _"as a document"_ and `kklaw` will saved it to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
+   ("Document" icon in the Telegram app, _"send without compression"_ in Telegram web).
+
+Prefix text with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
+
+There is no receiving files. Use git sync (below) or tell the LLM to send it to you via email.
 
 ## Software that pairs nicely with 💅`kklaw`
 
