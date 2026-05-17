@@ -165,7 +165,7 @@ Prefix with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees
 
 I use [🌳VMTREE](https://github.com/kkovacs/vmtree) for a self-hosted, minimalist, isolated running environment.
 
-I run Pi in a "workspace" directory that is a `git` repo it can push/pull, and I have (working copy)[https://workingcopyapp.com/] on my devices to see the same files. (I tried [Obsidian](https://obsidian.md/) too, but `git` sync was convoluted and error-prone.)
+I run Pi in a "workspace" directory that is a `git` repo it can push/pull, and I have [working copy](https://workingcopyapp.com/) on my devices to see the same files. (I tried [Obsidian](https://obsidian.md/) too, but `git` sync was convoluted and error-prone.)
 
 On the VM:
 
