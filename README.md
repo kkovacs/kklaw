@@ -117,7 +117,9 @@ bun run index.ts -vvv -- --continue
 
 ## Start on boot
 
-You can also use `cron` and `tmux`. (Or you can use anything else.) This example runs in a loop with a 5 sec backoff, so to restart `kklaw` just send it `/quit`. If you want a fresh session on every restart, remove `--continue`. If you just hate sessions, add `--no-session`. If you want extensions, keep adding `-e`s. These are all just `pi`'s options.
+You can use `cron` and `tmux` (or anything else).
+
+This example runs in a loop with a 5 sec backoff, so to restart `kklaw` just send it `/quit`. If you want a fresh session on every restart, remove `--continue`. If you just hate sessions, add `--no-session`. If you want extensions, keep adding `-e`s. These are all just `pi`'s options.
 
 ```
 @reboot tmux new-session -d -s kklaw 'cd ~/workspace/; while true; do ( set -a ; . .env ; set +a ; bun run ~/kklaw/index.ts -v -- --continue ; sleep 5 ); done'
@@ -159,12 +161,36 @@ Two ways to send files: Send _"as a photo"_ and it will be directly passed to th
 
 Prefix with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
 
-## Other amazing projects similar to this one (that I tried)
+## Software that pairs nicely with 💅`kklaw`
+
+```bash
+# From Ubuntu
+sudo apt install -y curl wget dnsutils git socat rsync jq gron unzip fdm swaks pandoc at imagemagick ffmpeg
+
+# Linux-brew - https://brew.sh/
+brew install duckdb go uv node gogcli
+brew install oven-sh/bun/bun
+
+# Chrome for a SKILL to use https://bun.com/docs/runtime/webview
+curl -LO https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb || true
+sudo apt install -f -y
+
+# Use your own SYSTEM prompt with Pi
+cat > .pi/SYSTEM.md <<EOF
+You are Alfred, a helpful personal assistant to Batman.
+You have uv and bun.
+EOF
+```
+
+I use [🌳VMTREE](https://github.com/kkovacs/vmtree) as minimalist, isolated, self-hosted running environment.
+
+## Other amazing projects similar to this one _(that I tried)_
 
 Pi extensions (**can't** switch sessions):
 
 - https://github.com/badlogic/pi-telegram - Mario's (author of Pi) original extension
-- https://github.com/llblab/pi-telegram - Maintained version of the above
+- https://github.com/llblab/pi-telegram - Well-maintained version of the above
 
 Gateway-style (**can** switch sessions):
 
@@ -172,4 +198,4 @@ Gateway-style (**can** switch sessions):
 
 Daddy:
 
-- https://pi.dev/ - Great thanks to Mario Zechner and the Vienna gang for Pi, OpenClaw, etc: none of this would be possible without them.
+- https://pi.dev/ - Great thanks to Mario Zechner and the Vienna gang for Pi, OpenClaw, etc: none of this would be possible without them, and I would actually be sleeping at night instead of working on this.
