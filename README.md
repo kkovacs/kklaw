@@ -163,27 +163,25 @@ Prefix with `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees
 
 ## Software that pairs nicely with 💅`kklaw`
 
+I use [🌳VMTREE](https://github.com/kkovacs/vmtree) as minimalist, isolated, self-hosted running environment. Also:
+
 ```bash
 # From Ubuntu
-sudo apt install -y curl wget dnsutils git socat rsync jq gron unzip fdm swaks pandoc at imagemagick ffmpeg
+sudo apt install -y curl wget git socat rsync jq gron unzip ripgrep fdm swaks pandoc at imagemagick ffmpeg docker.io docker-compose-v2
 
 # Linux-brew - https://brew.sh/
 brew install duckdb go uv node gogcli
 brew install oven-sh/bun/bun
 
-# Chrome for a SKILL to use https://bun.com/docs/runtime/webview
-curl -LO https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-sudo dpkg -i google-chrome-stable_current_amd64.deb || true
-sudo apt install -f -y
+# Chrome for a SKILL to browse with https://bun.com/docs/runtime/webview
+curl -LO https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && sudo dpkg -i google-chrome-stable_current_amd64.deb ; sudo apt install -f -y
 
 # Use your own SYSTEM prompt with Pi
 cat > .pi/SYSTEM.md <<EOF
 You are Alfred, a helpful personal assistant to Batman.
-You have uv and bun.
+You have uv and bun. You can use Chrome via <https://bun.com/docs/runtime/webview>
 EOF
 ```
-
-I use [🌳VMTREE](https://github.com/kkovacs/vmtree) as minimalist, isolated, self-hosted running environment.
 
 ## Other amazing projects similar to this one _(that I tried)_
 
