@@ -466,7 +466,10 @@ export class Gateway {
       `💬 Messages:      ${s.messageCount ?? 0}${s.pendingMessageCount ? ` (+${s.pendingMessageCount} pending)` : ""}`,
       `💭 Thinking:      ${s.thinkingLevel ?? "?"}`,
     ];
-    if (s.sessionFile) lines.push(`📁 Session file:  ${htmlEscape(s.sessionFile)}`);
+    if (s.sessionFile) {
+      const file = String(s.sessionFile);
+      lines.push(`📁 Session file:  ${htmlEscape(file)}`);
+    }
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStatus failed: ${err.message}`),
@@ -594,7 +597,7 @@ export class Gateway {
           let end = start;
           let curLen = tagOverhead;
           while (end < lines.length) {
-            const add = lines[end].length + 1;
+            const add = lines[end]!.length + 1;
             if (curLen + add > maxLen && end > start) break;
             curLen += add;
             end++;
@@ -620,13 +623,16 @@ export class Gateway {
       `📋 Session:       ${htmlEscape(String(s.sessionId ?? "?"))}`,
       `💬 Total messages: ${s.totalMessages ?? 0} (user: ${s.userMessages ?? 0}, assistant: ${s.assistantMessages ?? 0})`,
       `🔧 Tool calls:    ${s.toolCalls ?? 0} / results: ${s.toolResults ?? 0}`,
-      `📥 Tokens in:     ${tokens ? tok(tokens.input) : "?"}`,
-      `📤 Tokens out:    ${tokens ? tok(tokens.output) : "?"}`,
-      `💾 Tokens cache:  ${tokens ? `r:${tok(tokens.cacheRead)} w:${tok(tokens.cacheWrite)}` : "?"}`,
-      `📊 Tokens total:  ${tokens ? tok(tokens.total) : "?"}`,
+      `📥 Tokens in:     ${tokens ? tok(tokens.input!) : "?"}`,
+      `📤 Tokens out:    ${tokens ? tok(tokens.output!) : "?"}`,
+      `💾 Tokens cache:  ${tokens ? `r:${tok(tokens.cacheRead!)} w:${tok(tokens.cacheWrite!)}` : "?"}`,
+      `📊 Tokens total:  ${tokens ? tok(tokens.total!) : "?"}`,
       `💰 Cost:          $${s.cost != null ? Number(s.cost).toFixed(4) : "?"}`,
     ];
-    if (s.sessionFile) lines.push(`📁 Session file:  ${htmlEscape(s.sessionFile)}`);
+    if (s.sessionFile) {
+      const file = String(s.sessionFile);
+      lines.push(`📁 Session file:  ${htmlEscape(file)}`);
+    }
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStats failed: ${err.message}`),

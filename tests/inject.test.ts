@@ -41,8 +41,8 @@ describe("InjectWatcher", () => {
       watcher.stop();
 
       expect(calls.length).toBe(1);
-      expect(calls[0].filename).toBe("real.txt");
-      expect(calls[0].text).toBe("something");
+      expect(calls[0]!.filename).toBe("real.txt");
+      expect(calls[0]!.text).toBe("something");
 
       const remaining = readdirSync(dir);
       expect(remaining).toEqual([]);
@@ -78,7 +78,7 @@ describe("InjectWatcher", () => {
       watcher.stop();
 
       expect(calls.length).toBe(1);
-      expect(calls[0].filename).toBe("good.txt");
+      expect(calls[0]!.filename).toBe("good.txt");
 
       const remaining = readdirSync(dir);
       expect(remaining).toEqual(["subdir"]); // good.txt got unlinked, subdir stays

@@ -2123,8 +2123,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
     await gateway.handleTextMessage(ctx, api);
 
     expect(replies.length).toBe(1);
-    expect(replies[0].text).toContain("Usage");
-    expect(replies[0].other).toEqual({ parse_mode: "HTML" });
+    expect(replies[0]!.text).toContain("Usage");
+    expect(replies[0]!.other).toEqual({ parse_mode: "HTML" });
     expect(piCommands.length).toBe(0);
   });
 

@@ -105,9 +105,9 @@ describe("splitTelegramText", () => {
     const text = "A".repeat(9500);
     const result = splitTelegramText(text, 4000);
     expect(result.length).toBe(3);
-    expect(result[0].length).toBe(4000);
-    expect(result[1].length).toBe(4000);
-    expect(result[2].length).toBe(1500);
+    expect(result[0]!.length).toBe(4000);
+    expect(result[1]!.length).toBe(4000);
+    expect(result[2]!.length).toBe(1500);
   });
 
   it("does not produce empty chunks for whitespace-only boundaries", () => {

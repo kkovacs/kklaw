@@ -43,7 +43,7 @@ function readSessionInfo(path: string): SessionInfo | null {
     // Parse header (first line)
     let header: { type: string; id: string; timestamp: string } | null = null;
     try {
-      const h = JSON.parse(lines[0]);
+      const h = JSON.parse(lines[0]!);
       if (h.type === "session" && typeof h.id === "string") {
         header = h;
       }
@@ -55,9 +55,9 @@ function readSessionInfo(path: string): SessionInfo | null {
     // Scan for session name (latest session_info entry)
     let name: string | undefined;
     for (let i = 1; i < lines.length; i++) {
-      if (!lines[i].trim()) continue;
+      if (!lines[i]!.trim()) continue;
       try {
-        const entry = JSON.parse(lines[i]);
+        const entry = JSON.parse(lines[i]!);
         if (entry.type === "session_info" && "name" in entry) {
           name = (entry.name as string)?.trim() || undefined;
         }

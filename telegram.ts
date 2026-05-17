@@ -5,8 +5,8 @@
 export interface TelegramApi {
   sendMessage(chatId: number | string, text: string, other?: Record<string, unknown>): Promise<{ message_id: number }>;
   editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
-  sendChatAction(chatId: number | string, action: string): Promise<unknown>;
-  getFile(fileId: string): Promise<{ file_path?: string }>;
+  sendChatAction?(chatId: number | string, action: string): Promise<unknown>;
+  getFile?(fileId: string): Promise<{ file_path?: string }>;
   deleteMessage?(chatId: number | string, messageId: number): Promise<unknown>;
 }
 
@@ -15,8 +15,8 @@ export async function downloadTelegramFile(
   botToken: string,
   fileId: string,
 ): Promise<Buffer> {
-  const file = await api.getFile(fileId);
-  if (!file.file_path) throw new Error("Telegram getFile: no file_path");
+  const file = await api.getFile?.(fileId);
+  if (!file?.file_path) throw new Error("Telegram getFile: no file_path");
   const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Telegram file download failed: ${response.status}`);
@@ -136,7 +136,7 @@ export function createSafeEditor(
     async edit(fullText: string, isFinal?: boolean): Promise<void> {
       const candidate = fullText.slice(frozenLength);
       const lastIndex = messageIds.length - 1;
-      const lastMessageId = messageIds[lastIndex];
+      const lastMessageId = messageIds[lastIndex]!;
 
       try {
         await api.editMessageText(chatId, lastMessageId, candidate, mdOpts);
@@ -147,7 +147,7 @@ export function createSafeEditor(
         }
 
         if (isTooLongError(err)) {
-          const goodText = lastGoodTexts[lastIndex];
+          const goodText = lastGoodTexts[lastIndex]!;
           if (goodText && goodText !== candidate) {
             await rollbackLastMessage(lastMessageId, goodText);
           }
@@ -167,7 +167,7 @@ export function createSafeEditor(
           const chunks = splitTelegramText(textToChunk, 4000);
 
           for (let i = 0; i < chunks.length; i++) {
-            const chunk = chunks[i];
+            const chunk = chunks[i]!;
             const isLastChunk = i === chunks.length - 1;
             try {
               const sent = await sendChunk(chunk);
