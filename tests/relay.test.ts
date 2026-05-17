@@ -91,11 +91,10 @@ describe("createRelay", () => {
 });
 
 describe("escapeText", () => {
-  it("escapes [, ], (, ), ~, >, #, +, -, =, |, {, }, ., !, \\", () => {
+  it("escapes [, ], (, ), ~, #, +, -, =, |, {, }, ., !, \\", () => {
     expect(escapeText("[test]")).toBe("\\[test\\]");
     expect(escapeText("(parens)")).toBe("\\(parens\\)");
     expect(escapeText("~strikethrough~")).toBe("\\~strikethrough\\~");
-    expect(escapeText("> quote")).toBe("\\> quote");
     expect(escapeText("# heading")).toBe("\\# heading");
     expect(escapeText("1+1=2")).toBe("1\\+1\\=2");
     expect(escapeText("foo-bar")).toBe("foo\\-bar");
@@ -106,10 +105,11 @@ describe("escapeText", () => {
     expect(escapeText("\\backslash")).toBe("\\\\backslash");
   });
 
-  it("lets * _ ` through for Pi's markdown formatting", () => {
+  it("lets *, _, `, > through for Pi's markdown formatting", () => {
     expect(escapeText("**bold**")).toBe("**bold**");
     expect(escapeText("*italic*")).toBe("*italic*");
     expect(escapeText("_alsoitalic_")).toBe("_alsoitalic_");
     expect(escapeText("`code`")).toBe("`code`");
+    expect(escapeText("> blockquote")).toBe("> blockquote");
   });
 });

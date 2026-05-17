@@ -2,6 +2,8 @@
 // streaming edits with MESSAGE_TOO_LONG / parse-error handling, HTML escaping,
 // and tool-call formatting.
 
+import { escapeText } from "./relay";
+
 export interface TelegramApi {
   sendMessage(chatId: number | string, text: string, other?: Record<string, unknown>): Promise<{ message_id: number }>;
   editMessageText(chatId: number | string, messageId: number, text: string, other?: Record<string, unknown>): Promise<unknown>;
@@ -79,7 +81,8 @@ export function isParseError(err: unknown): boolean {
     msg.includes("entity name expected") ||
     msg.includes("parse entities") ||
     msg.includes("can't parse message text")
-  );
+);
+
 }
 
 export function createSafeEditor(
@@ -104,7 +107,7 @@ export function createSafeEditor(
 
   async function rollbackLastMessage(messageId: number, goodText: string): Promise<void> {
     try {
-      await api.editMessageText(chatId, messageId, goodText, mdOpts);
+      await api.editMessageText(chatId, messageId, escapeText(goodText), mdOpts);
     } catch (err) {
       if (isNotModifiedError(err)) return;
       if (isParseError(err)) {
@@ -123,7 +126,7 @@ export function createSafeEditor(
 
   async function sendChunk(text: string): Promise<{ message_id: number }> {
     try {
-      return await api.sendMessage(chatId, text, mdOpts);
+      return await api.sendMessage(chatId, escapeText(text), mdOpts);
     } catch (err) {
       if (isParseError(err)) {
         return await api.sendMessage(chatId, text);
@@ -139,7 +142,7 @@ export function createSafeEditor(
       const lastMessageId = messageIds[lastIndex]!;
 
       try {
-        await api.editMessageText(chatId, lastMessageId, candidate, mdOpts);
+        await api.editMessageText(chatId, lastMessageId, escapeText(candidate), mdOpts);
         lastGoodTexts[lastIndex] = candidate;
       } catch (err) {
         if (isNotModifiedError(err)) {

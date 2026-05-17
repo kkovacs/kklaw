@@ -6,7 +6,7 @@ export interface Relay {
   cancel(): void;
 }
 
-const MDV2_ESCAPE_TEXT = /([[\]()~>#+\-=|{}.!\\])/g;
+const MDV2_ESCAPE_TEXT = /([[\]()~#+\-=|{}.!\\])/g;
 
 export function escapeText(s: string): string {
   return s.replace(MDV2_ESCAPE_TEXT, '\\$1');
@@ -23,7 +23,7 @@ export function createRelay(opts: {
 
   function doEdit(): void {
     if (!buf) return;
-    opts.edit(escapeText(buf)).catch((err) => {
+    opts.edit(buf).catch((err) => {
       opts.log?.(`mid-stream edit failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
@@ -51,9 +51,8 @@ export function createRelay(opts: {
         opts.log?.("finalize: empty buffer, nothing to edit");
         return false;
       }
-      const text = escapeText(buf);
-      opts.log?.(`final edit len=${text.length}`);
-      await opts.edit(text, true).catch(() => {});
+      opts.log?.(`final edit len=${buf.length}`);
+      await opts.edit(buf, true).catch(() => {});
       buf = '';
       return true;
     },
