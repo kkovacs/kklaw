@@ -509,16 +509,16 @@ export class Gateway {
       );
       return;
     }
-    const escaped = escapeText(text);
-    const chunks = splitTelegramText(escaped, 4000);
-    for (const chunk of chunks) {
+    const chunks = splitTelegramText(text, 4000);
+    for (const raw of chunks) {
       // XXX: if this try/catch-with-plain-fallback pattern appears in more
       // call sites, extract a sendMessageSafe() utility
+      const md = escapeText(raw);
       try {
-        await this.api.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2" });
+        await this.api.sendMessage(chatId, md, { parse_mode: "MarkdownV2" });
       } catch (err) {
         if (isParseError(err)) {
-          await this.api.sendMessage(chatId, chunk);
+          await this.api.sendMessage(chatId, raw);
         } else {
           console.error(`[telegram] showLastMessage failed: ${err instanceof Error ? err.message : String(err)}`);
         }
