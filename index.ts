@@ -1045,7 +1045,7 @@ if (import.meta.main) {
 
   bot.command("quit", async (ctx) => {
     dbg(1, "/quit");
-    await ctx.reply("👋 Bye!");
+    await ctx.reply("🫡 kklaw — station secured. Going dark.");
     process.exit(0);
   });
 
@@ -1129,7 +1129,7 @@ if (import.meta.main) {
   spawnPi();
   gateway.lastChatId = allowedUserId;
   gateway.sendPi({ type: "get_state" });
-  bot.api.sendMessage(allowedUserId, "👋 kklaw online!").catch((err: Error) =>
+  bot.api.sendMessage(allowedUserId, "🫡 kklaw — station green. Ready for tasking.").catch((err: Error) =>
     console.error(`[telegram] welcome send failed: ${err.message}`),
   );
 
