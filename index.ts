@@ -1137,6 +1137,13 @@ if (import.meta.main) {
   watcher.start();
   dbg(1, `inject watcher started dir=${INJECT_DIR}`);
 
+  bot.api.config.use((prev, method, payload, signal) => {
+    if (method === "sendMessage" || method === "editMessageText") {
+      payload.link_preview_options = { is_disabled: true };
+    }
+    return prev(method, payload, signal);
+  });
+
   bot.start({
     drop_pending_updates: true,
     onStart: () => console.log("kklaw gateway started"),
