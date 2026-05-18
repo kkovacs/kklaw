@@ -262,7 +262,7 @@ export class Gateway {
         }
         let placeholder: { message_id: number };
         try {
-          placeholder = await this.api.sendMessage(this.currentChatId, "...");
+          placeholder = await this.api.sendMessage(this.currentChatId, "🤔 thinking...");
         } catch (err) {
           console.error(`[telegram] failed to send message (chat=${this.currentChatId}): ${err instanceof Error ? err.message : String(err)}`);
           return;

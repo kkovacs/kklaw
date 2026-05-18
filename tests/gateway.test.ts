@@ -278,7 +278,7 @@ describe("Gateway.handlePiEvent", () => {
     };
     const gateway = new Gateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
-    sent.length = 0; // ignore "..." placeholder
+    sent.length = 0; // ignore placeholder message
 
     gateway.handlePiEvent({ type: "turn_start" });
     gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
