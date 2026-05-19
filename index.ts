@@ -1105,17 +1105,17 @@ if (import.meta.main) {
   }
 
   await bot.api.setMyCommands([
-    { command: "new",       description: "Start a new session" },
     { command: "resume",    description: "Switch to a previous session" },
-    { command: "abort",     description: "Abort the current agent turn" },
     { command: "last",      description: "Show last assistant response text" },
-    { command: "delete",    description: "Delete the current session and start a new one" },
+    { command: "new",       description: "Start a new session" },
+    { command: "abort",     description: "Abort the current agent turn" },
+    { command: "abort_bash",description: "Abort the running bash command" },
     { command: "status",    description: "Show daemon status (uptime, Pi state, queue)" },
     { command: "session",    description: "Show session state (model, messages, thinking)" },
     { command: "name",      description: "Set a display name for the current session" },
-    { command: "model",     description: "List / filter available models, or switch model" },
-    { command: "abort_bash",description: "Abort the running bash command" },
+    { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "quit",      description: "Exit the daemon" },
+    { command: "model",     description: "List / filter available models, or switch model" },
     { command: "compact",   description: "Compact conversation context to reduce token usage" },
   ]).catch((err: Error) => {
     console.error(`[cmd] setMyCommands failed: ${err.message}`);
