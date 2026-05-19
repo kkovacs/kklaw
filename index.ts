@@ -598,7 +598,8 @@ export class Gateway {
       const filter = this.modelFilter.toLowerCase();
       const matches = models.filter(m =>
         (m.name ?? "").toLowerCase().includes(filter) ||
-        (m.id ?? "").toLowerCase().includes(filter)
+        (m.id ?? "").toLowerCase().includes(filter) ||
+        `${m.provider ?? ""}/${m.id ?? ""}`.toLowerCase().includes(filter)
       );
       this.modelFilter = undefined;
 

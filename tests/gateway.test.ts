@@ -1323,6 +1323,31 @@ describe("Gateway.showModels", () => {
     expect(ik[0][0].text).toBe("opencode-go/minimax-m2.5");
   });
 
+  it("filters by provider/id combined string", async () => {
+    const messages: any[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, _t, other) => { messages.push(other); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.modelFilter = "opencode-go/minimax";
+
+    const data = {
+      models: [
+        { provider: "opencode-go", id: "minimax-m2.5", name: "MiniMax M2.5" },
+        { provider: "anthropic", id: "claude-sonnet-4", name: "Claude Sonnet 4" },
+        { provider: "opencode-go", id: "gemma-3", name: "Gemma 3" },
+      ],
+    };
+
+    await gateway.showModels(1, data);
+
+    const ik = (messages[0] as any)?.reply_markup?.inline_keyboard;
+    expect(ik).toBeDefined();
+    expect(ik.length).toBe(1);
+    expect(ik[0][0].text).toBe("opencode-go/minimax-m2.5");
+  });
+
   it("shows no-match message when filter matches nothing", async () => {
     const messages: { text: string }[] = [];
     const api: TelegramApi = {
