@@ -96,7 +96,7 @@ There are two ways to send files in Telegram:
 
    ("Document" icon in the Telegram app, _"send without compression"_ in Telegram web).
 
-Use `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn.
+Use `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn. Use `!!` with the same syntax to run a command without later injecting its output into the LLM context.
 
 Currently there is no way for Pi to send files back to Telegram. If you need that, use `git` sync (see below), tell the LLM to send files to you via email, or to run `timeout 30 -- python -m http.server` with Tailscale, or anything. :)
 
@@ -168,9 +168,11 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `/status` | Show `kklaw` uptime, Pi pid, streaming state, queue |
 | `/session` | Show Pi session status and stats |
 | `/abort` | Abort the current agent turn (including tools) |
-| `/abort_bash` | Abort a running `!` bash command |
+| `/abort_bash` | Abort a running `!` / `!!` bash command |
 | `/compact [focus]` | Compact conversation context (optional focus instructions) |
 | `/quit` | Stop the gateway |
+| `!command` | Run a shell command via Pi; output goes into LLM context |
+| `!!command` | Run a shell command via Pi; output stays out of LLM context |
 
 All other slash commands are passed down to Pi. (To use skills, etc.) All errors are passed up to you on Telegram.
 

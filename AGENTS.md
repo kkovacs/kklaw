@@ -125,7 +125,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
 | `/delete` | `new_session` → (response handler) `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
-| `!command` | `bash` | runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler — routed to `lastChatId` |
+| `!command` / `!!command` | `bash` | runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler — routed to `lastChatId`. `!!` sets `excludeFromContext: true` (output not added to context) |
 
 ## Key design decisions
 

@@ -747,12 +747,13 @@ export class Gateway {
     }
 
     if (text.startsWith("!")) {
-      const command = text.slice(1).trim();
+      const excludeFromContext = text.startsWith("!!");
+      const command = text.slice(excludeFromContext ? 2 : 1).trim();
       if (!command) {
         await ctx.reply("Usage: !&lt;command&gt;", { parse_mode: "HTML" });
         return;
       }
-      this.sendPi({ type: "bash", command });
+      this.sendPi({ type: "bash", command, ...(excludeFromContext ? { excludeFromContext: true } : {}) });
       return;
     }
 
