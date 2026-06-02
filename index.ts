@@ -922,7 +922,7 @@ if (import.meta.main) {
     dbg(1, "/new");
     gateway.resetSession("/new");
     gateway.sendPi({ type: "new_session" });
-    await ctx.reply("🆕 New session.");
+    await ctx.reply("🆕 New session. Ready to roll 🫡");
   });
 
   bot.command("abort", async (ctx) => {
@@ -998,7 +998,7 @@ if (import.meta.main) {
 
     gateway.resetSession("/delete");
     gateway.sendPi({ type: "new_session" });
-    await ctx.reply("🗑️ Session deleted. 🆕 New session started.");
+    await ctx.reply("🗑️ Session deleted. New session: standing by 🫡");
   });
 
   bot.command("resume", async (ctx) => {
