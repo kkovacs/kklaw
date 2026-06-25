@@ -16,10 +16,11 @@ You also get to run bash commands from Telegram like `!rm -rf /` 😅
 
 There is no embedded cron, no scheduler — use Unix `cron`, `at`, or what you already have. `kklaw` watches an **inject directory** (`INJECT_DIR`). Any script can drop a text file into that directory, and `kklaw` will pick it up, delete it, and fire the contents as a prompt into the current Pi session. The response streams back to Telegram just like any other message.
 
-This is the hook for automation. Some use cases for the lazy and brilliant:
+This is the hook for automation. Some use cases for the brave and brilliant:
 
-- **Simulate HEARTBEAT** — in the _main session_ so you can ask the LLM about it _(I'm looking at you, Hermes)_
+- **Simulate HEARTBEAT** — and in the _main session_ so you *can* ask the LLM about it _(I'm looking at you, Hermes)_
 - **Scheduled wake-ups** — Skill your LLM with `at` and `kklaw` inject, and tell it to "do this in 45 minutes"
+- **Long-running tasks** — put `touch` at the end of a script, tell LLM to start script in the background
 - **Email triage** — fetch mails from cron but wake the LLM _only_ if there were any, to save money
 - **Monitoring alerts** — forward alerts or health check failures so your agent can investigate
 - **Log monitor** — with a `tail -f` a `grep` and a redirect, you can wake your agent when something happens
@@ -98,7 +99,7 @@ There are two ways to send files in Telegram:
 
 Use `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn. Use `!!` with the same syntax to run a command without later injecting its output into the LLM context.
 
-Currently there is no way for Pi to send files back to Telegram. If you need that, use `git` sync (see below), tell the LLM to send files to you via email, or to run `timeout 30 -- python -m http.server` with Tailscale, or anything. :)
+There is no _kknlaw-embedded_ way for Pi to send files back on Telegram. But options abound: use `git` sync (see below), tell the LLM to build a tiny "send-me-file-on-telegram-with-curl" skill, :o send files to you via email, or to run `timeout 30 -- python -m http.server` with Tailscale...
 
 ## INSTALL
 
