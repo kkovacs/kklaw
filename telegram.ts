@@ -68,6 +68,22 @@ export interface DocumentMessageContext {
   react(emoji: string): Promise<unknown>;
 }
 
+export interface VoiceMessageContext {
+  chatId: number | string;
+  from?: { id: number };
+  msg: {
+    caption?: string;
+    voice?: {
+      file_id: string;
+      mime_type?: string;
+      file_size?: number;
+      duration?: number;
+    };
+  };
+  reply(text: string, other?: Record<string, unknown>): Promise<unknown>;
+  react(emoji: string): Promise<unknown>;
+}
+
 export function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

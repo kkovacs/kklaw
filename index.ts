@@ -5,7 +5,7 @@ import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
-import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, isParseError, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "./telegram";
+import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, isParseError, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext, type VoiceMessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
 
 // ============================================================
@@ -857,6 +857,60 @@ export class Gateway {
       await ctx.reply(`📎 Saved: <code>${htmlEscape(savedName)}</code> — Pi can access it but was not notified.`, { parse_mode: "HTML" }).catch(() => {});
     }
   }
+
+  async handleVoiceMessage(
+    ctx: VoiceMessageContext,
+    api: TelegramApi = this.api,
+  ): Promise<void> {
+    const userId = ctx.from?.id;
+    dbg(1, `message:voice from user=${userId} chat=${ctx.chatId}`);
+
+    if (userId === undefined || userId !== this.allowedUserId) {
+      dbg(1, `rejected user ${userId} (allowed: ${this.allowedUserId})`);
+      return;
+    }
+
+    if (!UPLOAD_DIR) {
+      await ctx.reply("❌ UPLOAD_DIR is not set. Cannot save voice message.");
+      return;
+    }
+
+    const voice = ctx.msg.voice;
+    if (!voice?.file_id) return;
+
+    if (verbosity >= 2) {
+      dbg(2, `telegram voice msg: ${JSON.stringify({ userId, chatId: ctx.chatId, mimeType: voice.mime_type, duration: voice.duration })}`);
+    }
+
+    let buffer: Buffer;
+    try {
+      buffer = await this.downloadFile(voice.file_id);
+    } catch (err) {
+      console.error(`[telegram] voice download failed: ${err instanceof Error ? err.message : String(err)}`);
+      await ctx.reply("Failed to download voice message.");
+      return;
+    }
+
+    const mimeType = voice.mime_type ?? "audio/ogg";
+    const filename = `voice_${Date.now()}${extFromMime(mimeType)}`;
+    const savedName = await this.saveUpload(buffer, mimeType, filename);
+    if (!savedName) {
+      await ctx.reply("Failed to save voice message.");
+      return;
+    }
+
+    const prompt = `voice message from user: ${savedName}`;
+    await ctx.reply(`🎤 ${htmlEscape(prompt)}`, { parse_mode: "HTML" }).catch(() => {});
+
+    if (this.piStreaming) {
+      dbg(1, `pi busy, queuing voice message (queue.length=${this.queue.length})`);
+      this.queue.push({ chatId: ctx.chatId, text: prompt });
+      await ctx.react("👀");
+      return;
+    }
+
+    await this.startPiSession(ctx.chatId, prompt, api);
+  }
 }
 
 // ============================================================
@@ -1092,6 +1146,11 @@ if (import.meta.main) {
   bot.on("message:document", async (ctx) => {
     // grammy context satisfies DocumentMessageContext (has document.file_id, document.mime_type, optional caption)
     await gateway.handleDocumentMessage(ctx as unknown as DocumentMessageContext, ctx.api);
+  });
+
+  bot.on("message:voice", async (ctx) => {
+    // grammy context satisfies VoiceMessageContext (has voice.file_id, voice.mime_type, optional caption)
+    await gateway.handleVoiceMessage(ctx as unknown as VoiceMessageContext, ctx.api);
   });
 
   // Clear any chat-scoped commands from other bots (chat-scope overrides global scope)

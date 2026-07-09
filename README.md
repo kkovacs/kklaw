@@ -87,7 +87,7 @@ For example, juggling multiple sessions:
 
 ## Sending files
 
-There are two ways to send files in Telegram:
+There are three ways to send files in Telegram:
 
 1. Send _"as a photo"_ and `kklaw` will directly pass it to Pi (and also save to `UPLOAD_DIR` if set).
 
@@ -96,6 +96,8 @@ There are two ways to send files in Telegram:
 2. Send any file (even images) _"as a document"_ and `kklaw` will save it to `UPLOAD_DIR` — the LLM is **not** auto-notified; send a follow-up text message referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, documents are rejected.
 
    ("Document" icon in the Telegram app, _"send without compression"_ in Telegram web).
+
+3. Send a _voice message_ and `kklaw` will save it to `UPLOAD_DIR` as `voice_<timestamp>.ogg`, then prompt Pi with `voice message from user: <full_path>` so an audio-capable model can read it itself. If `UPLOAD_DIR` is not set, voice messages are rejected.
 
 Use `!` to run a shell command — e.g. `!ls -l uploads/`. Your LLM sees the output on the next turn. Use `!!` with the same syntax to run a command without later injecting its output into the LLM context.
 
