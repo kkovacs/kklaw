@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gateway, extFromMime } from "../index";
-import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext } from "../telegram";
+import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext, type VoiceMessageContext } from "../telegram";
 import { loadFixtureLines } from "./helpers";
 import type { PiClient } from "../pi-client";
 
@@ -55,6 +55,23 @@ function mockDocumentContext(overrides: Partial<DocumentMessageContext> = {}): D
         file_id: "doc_file_id",
         mime_type: "image/png",
         file_name: "photo.png",
+      },
+    },
+    reply: async () => {},
+    react: async () => {},
+    ...overrides,
+  };
+}
+
+function mockVoiceContext(overrides: Partial<VoiceMessageContext> = {}): VoiceMessageContext {
+  return {
+    chatId: 123,
+    from: { id: 8476228873 },
+    msg: {
+      voice: {
+        file_id: "voice_file_id",
+        mime_type: "audio/ogg",
+        duration: 5,
       },
     },
     reply: async () => {},
@@ -2462,5 +2479,135 @@ describe("Gateway.handleTextMessage (! commands)", () => {
     // Bash commands bypass the queue regardless of stream state
     expect(piCommands).toEqual([{ type: "bash", command: "df -h" }]);
     expect(gateway.queue.length).toBe(0);
+  });
+});
+
+describe("Gateway.handleVoiceMessage", () => {
+  it("rejects unauthorized user", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 999, api });
+    gateway.downloadFile = async () => Buffer.from("fake");
+    const ctx = mockVoiceContext({ from: { id: 111 } });
+    let replied = false;
+    ctx.reply = async () => { replied = true; };
+
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(gateway.queue.length).toBe(0);
+    expect(gateway.piStreaming).toBe(false);
+    expect(replied).toBe(false);
+  });
+
+  it("returns error when UPLOAD_DIR is not set", async () => {
+    delete process.env.UPLOAD_DIR;
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("fake");
+
+    const ctx = mockVoiceContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(replies).toEqual(["❌ UPLOAD_DIR is not set. Cannot save voice message."]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("ignores voice message with missing file_id", async () => {
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.sendPi = () => {};
+
+    const ctx = mockVoiceContext({ msg: { voice: undefined } });
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(gateway.piStreaming).toBe(false);
+  });
+
+  it("replies 'Failed to download voice message.' on download error", async () => {
+    process.env.UPLOAD_DIR = "/uploads";
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => { throw new Error("network down"); };
+
+    const ctx = mockVoiceContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(replies).toEqual(["Failed to download voice message."]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("replies 'Failed to save voice message.' when saveUpload returns null", async () => {
+    process.env.UPLOAD_DIR = "/uploads";
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("ogg-data");
+    gateway.saveUpload = async () => null;
+
+    const ctx = mockVoiceContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(replies).toEqual(["Failed to save voice message."]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.queue.length).toBe(0);
+  });
+
+  it("starts a session with voice prompt when pi is idle", async () => {
+    process.env.UPLOAD_DIR = "/uploads";
+    const piCommands: object[] = [];
+    const replies: string[] = [];
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.downloadFile = async () => Buffer.from("ogg-data");
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    gateway.saveUpload = async () => "/uploads/voice_1234567890.ogg";
+
+    const ctx = mockVoiceContext();
+    ctx.reply = async (text) => { replies.push(text); };
+
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(replies[0]).toContain("voice message from user: /uploads/voice_1234567890.ogg");
+    expect(piCommands).toEqual([{
+      type: "prompt",
+      message: "voice message from user: /uploads/voice_1234567890.ogg",
+    }]);
+    expect(gateway.piStreaming).toBe(true);
+  });
+
+  it("queues voice prompt and reacts when pi is busy", async () => {
+    process.env.UPLOAD_DIR = "/uploads";
+    const api = mockApi();
+    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    gateway.piStreaming = true;
+    gateway.downloadFile = async () => Buffer.from("busy-ogg");
+    gateway.saveUpload = async () => "/uploads/voice_busy.ogg";
+
+    const reactions: string[] = [];
+    const ctx = mockVoiceContext();
+    ctx.react = async (emoji) => { reactions.push(emoji); };
+
+    await gateway.handleVoiceMessage(ctx, api);
+
+    expect(gateway.queue.length).toBe(1);
+    expect(gateway.queue[0]!.text).toBe("voice message from user: /uploads/voice_busy.ogg");
+    expect(gateway.queue[0]!).not.toHaveProperty("images");
+    expect(reactions).toEqual(["👀"]);
+  });
+});
+
+describe("extFromMime", () => {
+  it("extracts audio extensions", () => {
+    expect(extFromMime("audio/ogg")).toBe(".ogg");
+    expect(extFromMime("audio/mpeg")).toBe(".mpeg");
   });
 });

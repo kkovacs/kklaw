@@ -16,7 +16,9 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const PI_PATH = (process.env.PI_PATH ?? "pi").replace(/^~/, homedir());
 const SESSION_DIR = (process.env.PI_SESSION_DIR ?? join(homedir(), ".pi", "agent", "sessions")).replace(/^~/, homedir());
 const INJECT_DIR = (process.env.INJECT_DIR ?? join(homedir(), ".pi", "agent", "injects")).replace(/^~/, homedir());
-const UPLOAD_DIR = (process.env.UPLOAD_DIR ?? "").replace(/^~/, homedir()) || null;
+function uploadDir(): string | null {
+  return (process.env.UPLOAD_DIR ?? "").replace(/^~/, homedir()) || null;
+}
 
 // Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
@@ -160,10 +162,11 @@ export class Gateway {
   }
 
   async saveUpload(buffer: Buffer, mimeType: string, filename?: string): Promise<string | null> {
-    if (!UPLOAD_DIR) return null;
+    const dir = uploadDir();
+    if (!dir) return null;
     const ext = extFromMime(mimeType);
     const name = filename ?? `${Date.now()}${ext}`;
-    const target = join(UPLOAD_DIR, name);
+    const target = join(dir, name);
     try {
       await writeFile(target, buffer);
       return target;
@@ -833,7 +836,7 @@ export class Gateway {
     const doc = ctx.msg.document;
     if (!doc?.file_id) return;
 
-    if (!UPLOAD_DIR) {
+    if (!uploadDir()) {
       await ctx.reply("❌ UPLOAD_DIR is not set. Cannot save document.");
       return;
     }
@@ -870,7 +873,7 @@ export class Gateway {
       return;
     }
 
-    if (!UPLOAD_DIR) {
+    if (!uploadDir()) {
       await ctx.reply("❌ UPLOAD_DIR is not set. Cannot save voice message.");
       return;
     }
@@ -1182,6 +1185,7 @@ if (import.meta.main) {
   });
 
 
+  const UPLOAD_DIR = uploadDir();
   if (UPLOAD_DIR) {
     await mkdir(UPLOAD_DIR, { recursive: true });
     dbg(1, `upload dir ensured: ${UPLOAD_DIR}`);
