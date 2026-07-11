@@ -243,13 +243,4 @@ export function htmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export function formatToolCall(args: unknown, toolName: string): string {
-  let argStr = "";
-  if (args != null) {
-    const json = JSON.stringify(args);
-    const max = 250;
-    argStr = htmlEscape(json.length > max ? json.slice(0, max - 3) + "..." : json);
-  }
-  const tn = htmlEscape(toolName);
-  return `<pre>\uD83D\uDD27 ${tn}${argStr ? `: ${argStr}` : ""}</pre>`;
-}
+

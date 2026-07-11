@@ -187,41 +187,6 @@ describe("Gateway.sendTyping", () => {
   });
 });
 
-describe("formatToolCall", () => {
-  it("formats tool name and args as <pre> HTML", () => {
-    const result = formatToolCall({ command: "ls -la" }, "bash");
-    expect(result).toBe('<pre>\uD83D\uDD27 bash: {"command":"ls -la"}</pre>');
-  });
-
-  it("formats tool without args", () => {
-    const result = formatToolCall(undefined, "unknown_tool");
-    expect(result).toBe('<pre>\uD83D\uDD27 unknown_tool</pre>');
-  });
-
-  it("formats tool with null args", () => {
-    const result = formatToolCall(null, "bash");
-    expect(result).toBe('<pre>\uD83D\uDD27 bash</pre>');
-  });
-
-  it("truncates long args at 250 chars with ...", () => {
-    const longCmd = "x".repeat(300);
-    const result = formatToolCall({ command: longCmd }, "bash");
-    expect(result.length).toBeLessThanOrEqual(300); // <pre>🔧 bash:  + 250-chars json + </pre>
-    expect(result).toContain("...");
-    expect(result).toEndWith('</pre>');
-  });
-
-  it("HTML-escapes <, >, & in tool name", () => {
-    const result = formatToolCall({}, "<bash> & stuff");
-    expect(result).toContain("&lt;bash&gt; &amp; stuff");
-  });
-
-  it("HTML-escapes <, >, & in args JSON", () => {
-    const result = formatToolCall({ path: "src/<foo> & bar.txt" }, "read");
-    expect(result).toContain("src/&lt;foo&gt; &amp; bar.txt");
-  });
-});
-
 describe("Gateway.handlePiEvent", () => {
   it("streams text_delta through relay", async () => {
     const api = mockApi();
