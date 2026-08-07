@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
 import { createPiClient, type PiClient } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
@@ -1028,6 +1028,41 @@ if (import.meta.main) {
     await ctx.reply("✏️ Named.");
   });
 
+  bot.command("archive", async (ctx) => {
+    dbg(1, "/archive");
+
+    const sessionId = gateway.currentSessionId;
+    if (sessionId) {
+      try {
+        let info = gateway.sessionPicker.get(sessionId);
+        if (!info) {
+          gateway.scanRecentSessions();
+          info = gateway.sessionPicker.get(sessionId);
+        }
+        if (info) {
+          const archiveBase = join(homedir(), ".pi", "agent", "sessions-archive");
+          const relPath = relative(SESSION_DIR, info.path);
+          const archivePath = join(archiveBase, relPath);
+          await mkdir(dirname(archivePath), { recursive: true });
+          await rename(info.path, archivePath);
+          dbg(1, `archiveSession: archived ${info.path} -> ${archivePath}`);
+        } else {
+          console.error(`[archive] session ${sessionId} not found in picker; skipping archive`);
+        }
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") {
+          console.error(`[archive] archive failed: ${err?.message ?? err}`);
+        }
+      }
+    } else {
+      console.error("[archive] no current session ID to archive");
+    }
+
+    gateway.resetSession("/archive");
+    gateway.sendPi({ type: "new_session" });
+    await ctx.reply("📦 Session archived. New session: standing by 🫡");
+  });
+
   bot.command("delete", async (ctx) => {
     dbg(1, "/delete");
 
@@ -1170,8 +1205,9 @@ if (import.meta.main) {
   await bot.api.setMyCommands([
     { command: "resume",    description: "Switch to a previous session" },
     { command: "last",      description: "Show last assistant response text" },
-    { command: "delete",    description: "Delete the current session and start a new one" },
+    { command: "archive",   description: "Archive the current session and start a new one" },
     { command: "new",       description: "Start a new session" },
+    { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "abort",     description: "Abort the current agent turn" },
     { command: "abort_bash",description: "Abort the running bash command" },
     { command: "status",    description: "Show daemon status (uptime, Pi state, queue)" },
