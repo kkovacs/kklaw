@@ -108,9 +108,9 @@ External tool writes a file to the inject dir → `InjectWatcher.scan()` detects
 
 ## Slash commands
 
-Commands use loose coupling: the handler sets `lastChatId` (routing target, initialized once at startup to `allowedUserId`) and/or `currentSessionId` (for in-memory lookups, e.g. `/delete`, `/archive`), fires the RPC; `handlePiEvent` response handler picks it up and posts to `lastChatId`. All commands (except `/start`) require auth via `bot.filter()`.
+Commands use loose coupling: the handler sets `lastChatId` (routing target, initialized once at startup to `allowedUserId`) and/or `currentSessionId` (for in-memory lookups, e.g. `/delete`), fires the RPC; `handlePiEvent` response handler picks it up and posts to `lastChatId`. All commands (except `/start`) require auth via `bot.filter()`.
 
-Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. This means commands like `/delete`, `/archive` can use the stored ID directly without a roundtrip. `resetSession()` clears `currentSessionId`.
+Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. This means commands like `/delete` can use the stored ID directly without a roundtrip. `resetSession()` clears `currentSessionId`.
 
 | Telegram command | RPC command | Response |
 |------------------|-------------|----------|
@@ -124,7 +124,6 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
 | `/delete` | `new_session` → (response handler) `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
-| `/archive` | `new_session` → (response handler) `get_state` | uses stored `currentSessionId` to rename session file to `sessions-archive/`, resets, shows new session status |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
 | `!command` / `!!command` | `bash` | runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler — routed to `lastChatId`. `!!` sets `excludeFromContext: true` (output not added to context) |
 
