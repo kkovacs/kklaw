@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gateway, extFromMime } from "../index";
-import { formatToolCall, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext, type VoiceMessageContext } from "../telegram";
+import { type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext, type VoiceMessageContext } from "../telegram";
 import { loadFixtureLines } from "./helpers";
 import type { PiClient } from "../pi-client";
 

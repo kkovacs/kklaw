@@ -1204,7 +1204,7 @@ if (import.meta.main) {
 
   bot.api.config.use((prev, method, payload, signal) => {
     if (method === "sendMessage" || method === "editMessageText") {
-      payload.link_preview_options = { is_disabled: true };
+      (payload as { link_preview_options?: { is_disabled?: boolean } }).link_preview_options = { is_disabled: true };
     }
     return prev(method, payload, signal);
   });
