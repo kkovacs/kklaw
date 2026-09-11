@@ -20,7 +20,7 @@ function uploadDir(): string | null {
   return (process.env.UPLOAD_DIR ?? "").replace(/^~/, homedir()) || null;
 }
 
-// Verbosity: -v = key events, -vv = + all event types, -vvv = + full JSON + raw pi lines
+// Verbosity: -v = key events, -vv = + sendPi raw + telegram msg summaries, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
 const STREAMING_EVENTS = new Set(["message_update", "message_start", "message_end", "turn_start", "turn_end"]);
 let streamingDots = 0;
