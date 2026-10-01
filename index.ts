@@ -119,6 +119,15 @@ function toolArgPreview(toolName: string, args: Record<string, unknown> | undefi
       return line.length <= 60 ? line : line.slice(0, 60) + "…";
     }
   }
+  if (toolName === "codemode") {
+    const code = args.code;
+    if (typeof code === "string") {
+      // First non-comment, non-blank line — the options line (`//!...`) is skipped.
+      const line = code.split("\n").map((l) => l.trim())
+        .find((l) => l && !l.startsWith("//")) ?? "";
+      return line.length <= 60 ? line : line.slice(0, 60) + "…";
+    }
+  }
   return null;
 }
 

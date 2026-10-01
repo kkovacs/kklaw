@@ -414,6 +414,21 @@ describe("Gateway.handlePiEvent", () => {
     expect(sent).toEqual(["🔧 <code>bash</code> cd /tmp"]);
   });
 
+  it("tool_execution_start shows first non-comment line for codemode", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    await gateway.startPiSession(123, "test");
+    sent.length = 0;
+
+    await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "codemode", toolCallId: "call_1", args: { code: "//!timeout_ms=5000\n// fetch and sort\nconst files = await tools.read({ path: '/tmp/a' })" } });
+
+    expect(sent).toEqual(["🔧 <code>codemode</code> const files = await tools.read({ path: '/tmp/a' })"]);
+  });
+
   it("tool_execution_start falls back for unknown tools", async () => {
     const sent: string[] = [];
     const api: TelegramApi = {
