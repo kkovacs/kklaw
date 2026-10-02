@@ -116,7 +116,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | Telegram command | RPC command | Response |
 |------------------|-------------|----------|
 | `/new` | `new_session` → (response handler) `get_state` | cancels relay + resets state; shows new session status |
-| `/abort` | `abort` | cancels relay, clears streaming state; replies "🛑 Aborted." XXX: steer messages queued in pi survive abort until `clear_queue` is wired up |
+| `/abort` | `clear_queue` (id) + `abort` | cancels relay, clears streaming state; replies "🛑 Aborted." once the `clear_queue` response lands, prepending `Cleared N queued messages.` when pi had steer/follow-up entries queued (plain reply on response error or 1500ms timeout) |
 | `/abort_bash` | `abort_bash` | replies "🛑 Bash aborted." |
 | `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping |
@@ -137,6 +137,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 - **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end`/`agent_settled` don't trigger it.
 - **Idle detection**: `piStreaming` is cleared only on `agent_settled`, not `agent_end` — post-agent_end events (retries, compaction, steered turns) still route to the active chat.
 - **Mid-run forwarding via steer**: busy-path messages send `steer` with a generated correlation id; the response handler (`steerFallbacks`) resends the message as a fresh `prompt` run when the steer is rejected (e.g. sent right at `agent_end` — the agent_end→agent_settled race) or consumed with `disposition: "handled"` without starting work. `disposition: "queued"` needs no action.
+  Queued steers/follow-ups live in the pi process; `/abort` drains them with `clear_queue` sent *before* `abort` (abort alone continues the run with queued messages still in the session).
 - **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).
 - **MarkdownV2 escape**: relaxed escape — `*` `_` `` ` `` pass through for Pi's formatting; all other reserved chars (`[`, `(`, `~`, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`, `\`) escaped.
 - **Response routing**: a single `lastChatId` field routes all command responses (status, stats, bash output, model lists, last message). `deleteInProgress` flag (boolean) — not a separate chat ID — triggers delete-specific logic on `get_state` responses alongside normal status display. 
@@ -170,6 +171,7 @@ prompt:      { type: "prompt", message: string, images?: ImageContent[] }
 bash:        { type: "bash", command: string }
 abort:       { type: "abort" }
 abort_bash:  { type: "abort_bash" }
+clear_queue: { type: "clear_queue", id?: string } → data `{ steering: string[], followUp: string[] }`
 response:    { type: "response", command?: string, success: bool, error?: string, data?: unknown }
 ImageContent: `{ type: "image", data: string (base64), mimeType: string }`
 ModelInfo (subset used): `{ id, name, provider, contextWindow, input[], cost: { input, output } }`

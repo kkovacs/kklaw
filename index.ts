@@ -160,6 +160,11 @@ export class Gateway {
   deleteFile: (path: string) => Promise<void> = unlink;
   startedAt = new Date();
 
+  // /abort replies in flight: clear_queue id → finish(queued). finish sends the
+  // reply exactly once — counts prepended when the response delivered any,
+  // plain "🛑 Aborted." on timeout/resetSession fallback.
+  abortPending: Map<string, (queued?: number) => void> = new Map();
+
   constructor(options: { allowedUserId: number; api: TelegramApi; botToken?: string }) {
     this.allowedUserId = options.allowedUserId;
     this.api = options.api;
@@ -247,6 +252,11 @@ export class Gateway {
         const fallback = this.steerFallbacks.get(resp.id);
         this.steerFallbacks.delete(resp.id);
         fallback?.(resp);
+      }
+      if (resp.command === "clear_queue" && resp.id) {
+        const finish = this.abortPending.get(resp.id);
+        const d = resp.data as { steering?: string[]; followUp?: string[] } | undefined;
+        finish?.((d?.steering?.length ?? 0) + (d?.followUp?.length ?? 0));
       }
       return;
     }
@@ -502,8 +512,30 @@ export class Gateway {
     this.sendPi(cmd);
   }
 
+  // Abort pi and drain its steering/follow-up queues. Called by /abort.
+  // clear_queue is sent first so pi returns the queued texts instead of
+  // running them after abort (abort alone continues the run with queued
+  // messages remaining — pi RPC docs). clear_queue response (or the 1500ms
+  // timeout / resetSession fallback) fires finish() exactly once; finish
+  // deletes the id first, so a late response after timeout is inert.
+  abortPi(chatId: number | string): void {
+    const id = `clear-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const finish = (queued?: number) => {
+      clearTimeout(timer);
+      if (!this.abortPending.delete(id)) return; // already fired (timeout/reset race)
+      const text = queued ? `🛑 Aborted. Cleared ${queued} queued messages.` : "🛑 Aborted.";
+      void this.api.sendMessage(chatId, text).catch((err: Error) =>
+        console.error(`[telegram] abort reply failed: ${err.message}`));
+    };
+    const timer = setTimeout(() => finish(), 1500);
+    this.abortPending.set(id, finish);
+    this.sendPi({ type: "clear_queue", id });
+    this.sendPi({ type: "abort" });
+  }
+
   resetSession(caller: string): void {
     dbg(1, `resetSession (${caller})`);
+    for (const [id, finish] of this.abortPending) finish();
     this.currentRelay?.cancel();
     this.currentRelay = null;
     this.piStreaming = false;
@@ -1017,9 +1049,9 @@ if (import.meta.main) {
     gateway.currentRelay = null;
     gateway.piStreaming = false;
     gateway.turnToolCounts.clear();
-    gateway.sendPi({ type: "abort" });
-    // XXX: steer messages queued in pi survive abort until task c adds clear_queue
-    await ctx.reply("🛑 Aborted.");
+    // Replies once the clear_queue response (or timeout fallback) lands,
+    // with cleared-steer/follow-up counts when any were pending.
+    gateway.abortPi(ctx.chatId);
   });
 
   bot.command("abort_bash", async (ctx) => {
