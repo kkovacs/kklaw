@@ -198,7 +198,7 @@ export class Gateway {
       console.error(`[pi] event JSON: ${JSON.stringify(event)}`);
     }
 
-    if (type !== "response" && type !== "agent_end" && this.currentChatId) {
+    if (type !== "response" && type !== "agent_end" && type !== "agent_settled" && this.currentChatId) {
       this.sendTyping(this.currentChatId);
     }
 
@@ -329,9 +329,10 @@ export class Gateway {
       return;
     }
 
+    // agent_end closes only one low-level agent run; retries/recovery may
+    // continue after it. Use agent_settled (below) as the true idle signal.
     if (type === "agent_end") {
       dbg(1, `agent_end`);
-      this.piStreaming = false;
 
       const messages = (event as PiEvent).messages;
       const errorMsg = messages?.find(m => m.stopReason === 'error')?.errorMessage;
@@ -381,9 +382,14 @@ export class Gateway {
       this.currentRelay = null;
       this.lastPiError = undefined;
       this.piErrorSent = false;
+      return;
+    }
+
+    if (type === "agent_settled") {
+      dbg(1, `agent_settled`);
+      this.piStreaming = false;
       this.currentChatId = 0;
       this.currentPlaceholderMessageId = 0;
-      this.processQueue();
       return;
     }
 
@@ -429,6 +435,8 @@ export class Gateway {
     }
 
     // XXX: other events not handled yet (extension_ui, etc.)
+    // Known no-op events we deliberately ignore (avoid log noise):
+    if (type === "agent_start" || type === "turn_start" || type === "turn_end") return;
     dbg(1, `unhandled pi event type: ${type}`);
   };
 
@@ -962,14 +970,12 @@ if (import.meta.main) {
       onExit: (code) => {
         gateway.piStreaming = false;
         gateway.currentRelay = null;
-        gateway.processQueue();
         console.error(`[pi] exited (code=${code}). Restarting in 1s...`);
         setTimeout(spawnPi, 1000);
       },
       onError: (err) => {
         gateway.piStreaming = false;
         gateway.currentRelay = null;
-        gateway.processQueue();
         console.error(`[pi] spawn error: ${err.message}`);
         setTimeout(spawnPi, 1000);
       },
