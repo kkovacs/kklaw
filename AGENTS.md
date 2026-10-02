@@ -124,6 +124,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | `/resume` | (none; filesystem scan) → button → `switch_session` → (response handler) `get_state` | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC → `get_state` to show new session status |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
+| `/think [level]` | `get_available_thinking_levels` (list) / `set_thinking_level` (set) | no args → `<pre>` list + inline keyboard buttons firing `set_thinking_level`; with level → sets it. The set response carries no data echo, so the ack reuses the level saved in `pendingThinkLevel` (keyed by chat id, cleared on success or error) |
 | `/compact [focus]` | `compact` (with optional `customInstructions`) | `showCompact()` on success; `❌ Compaction failed: …` on error |
 | `/delete` | `new_session` → (response handler) `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
@@ -136,6 +137,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 - **Debounced streaming**: buffer accumulates deltas, `editMessageText` fires on a timer, final edit on `message_end`. New `Relay` created per assistant `message_start`; each Pi message maps to one Telegram message.
 - **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end`/`agent_settled` don't trigger it.
 - **Idle detection**: `piStreaming` is cleared only on `agent_settled`, not `agent_end` — post-agent_end events (retries, compaction, steered turns) still route to the active chat.
+- **`/think` mirrors `/model`**: same no-args list + inline-keyboard / arg-set split, same `lastChatId` routing. `set_thinking_level` responses echo no data, so the ack level comes from `pendingThinkLevel` (set by the `/think <level>` handler and the `think:` callback, cleared on either success or error).
 - **Mid-run forwarding via steer**: busy-path messages send `steer` with a generated correlation id; the response handler (`steerFallbacks`) resends the message as a fresh `prompt` run when the steer is rejected (e.g. sent right at `agent_end` — the agent_end→agent_settled race) or consumed with `disposition: "handled"` without starting work. `disposition: "queued"` needs no action.
   Queued steers/follow-ups live in the pi process; `/abort` drains them with `clear_queue` sent *before* `abort` (abort alone continues the run with queued messages still in the session).
 - **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).

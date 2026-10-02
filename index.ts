@@ -153,6 +153,8 @@ export class Gateway {
   currentSessionId: string | null = null;
   sessionPicker: Map<string, SessionInfo> = new Map();
   modelFilter?: string;
+  // Level wired by /think <level>, keyed by routing chat id; consumed on the set ack
+  pendingThinkLevel: Map<number | string, string> = new Map();
   allowedUserId: number;
   api: TelegramApi;
   botToken: string;
@@ -211,6 +213,9 @@ export class Gateway {
           this.api.sendMessage(this.lastChatId, `❌ Compaction failed: ${resp.error ?? "unknown error"}`)
             .catch((err: Error) => console.error(`[telegram] compact error failed: ${err.message}`));
         }
+        if (resp.command === "set_thinking_level") {
+          this.pendingThinkLevel.delete(this.lastChatId);
+        }
       } else {
         dbg(1, `pi response ok: ${resp.command}`);
         if (resp.command === "new_session") {
@@ -235,6 +240,19 @@ export class Gateway {
         }
         if (resp.command === "get_available_models" && this.lastChatId) {
           this.showModels(this.lastChatId, resp.data);
+        }
+        if (resp.command === "get_available_thinking_levels" && this.lastChatId) {
+          this.showThinkingLevels(this.lastChatId, resp.data);
+        }
+        if (resp.command === "set_thinking_level" && this.lastChatId) {
+          // set_thinking_level response has no data echo (verified in pi rpc-types);
+          // confirm the level we wired in the /think handler
+          const chatId = this.lastChatId;
+          const level = this.pendingThinkLevel.get(chatId) ?? "unknown";
+          this.pendingThinkLevel.delete(chatId);
+          await this.api.sendMessage(chatId, `💭 Thinking level: ${level}`).catch((err: Error) =>
+            console.error(`[telegram] set_thinking_level ack failed: ${err.message}`),
+          );
         }
         if (resp.command === "bash" && this.lastChatId) {
           const d = resp.data as { output?: string; exitCode?: number; truncated?: boolean } | undefined;
@@ -599,6 +617,26 @@ export class Gateway {
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
       console.error(`[telegram] showStatus failed: ${err.message}`),
+    );
+  }
+
+  async showThinkingLevels(chatId: number | string, data: unknown): Promise<void> {
+    const d = data as { levels?: string[] } | undefined;
+    const levels = d?.levels ?? [];
+
+    if (levels.length === 0) {
+      await this.api.sendMessage(chatId, "❌ No thinking levels available.").catch((err: Error) =>
+        console.error(`[telegram] showThinkingLevels failed: ${err.message}`),
+      );
+      return;
+    }
+
+    const lines = [`💭 Available thinking levels (${levels.length}):`, ""];
+    for (const l of levels) lines.push(l);
+    const text = `<pre>${htmlEscape(lines.join("\n"))}</pre>`;
+    const inline_keyboard = [levels.map(l => ({ text: l, callback_data: `think:${l}` }))];
+    await this.api.sendMessage(chatId, text, { parse_mode: "HTML", reply_markup: { inline_keyboard } }).catch((err: Error) =>
+      console.error(`[telegram] showThinkingLevels failed: ${err.message}`),
     );
   }
 
@@ -1175,6 +1213,22 @@ if (import.meta.main) {
     gateway.sendPi({ type: "get_available_models" });
   });
 
+  bot.command("think", async (ctx) => {
+    dbg(1, "/think");
+    if (!ctx.chat) return;
+    const level = ctx.match?.trim();
+    if (level) {
+      // set_thinking_level response has no data echo (verified in pi rpc-types),
+      // so remember the level for the confirmation reply
+      gateway.lastChatId = ctx.chat.id;
+      gateway.pendingThinkLevel.set(ctx.chat.id, level);
+      gateway.sendPi({ type: "set_thinking_level", level });
+      return;
+    }
+    gateway.lastChatId = ctx.chat.id;
+    gateway.sendPi({ type: "get_available_thinking_levels" });
+  });
+
   bot.command("compact", async (ctx) => {
     dbg(1, "/compact");
     const customInstructions = ctx.match?.trim();
@@ -1195,6 +1249,16 @@ if (import.meta.main) {
     gateway.sendPi({ type: "set_model", provider, modelId });
     await ctx.answerCallbackQuery(`✅ Switched to ${provider}/${modelId}.`);
     await ctx.editMessageText(`✅ Model: ${provider}/${modelId}`);
+  });
+
+  bot.callbackQuery(/^think:(.+)$/, async (ctx) => {
+    const level = ctx.match?.[1];
+    if (!level || !ctx.chat) return;
+    gateway.lastChatId = ctx.chat.id;
+    gateway.pendingThinkLevel.set(ctx.chat.id, level);
+    gateway.sendPi({ type: "set_thinking_level", level });
+    await ctx.answerCallbackQuery(`💭 ${level}…`);
+    await ctx.editMessageText(`💭 Setting thinking level: ${level}…`);
   });
 
   bot.on("message:text", async (ctx) => {
@@ -1239,6 +1303,7 @@ if (import.meta.main) {
     { command: "name",      description: "Set a display name for the current session" },
     { command: "quit",      description: "Exit the daemon" },
     { command: "model",     description: "List / filter available models, or switch model" },
+    { command: "think",     description: "List / set thinking level (off..max)" },
     { command: "compact",   description: "Compact conversation context to reduce token usage" },
   ]).catch((err: Error) => {
     console.error(`[cmd] setMyCommands failed: ${err.message}`);

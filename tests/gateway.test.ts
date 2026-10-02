@@ -352,6 +352,82 @@ describe("Gateway.handlePiEvent", () => {
     expect(sent.length).toBe(0);
   });
 
+  it("renders thinking levels list with inline keyboard", async () => {
+    const sent: Array<{ chatId: number | string; text: string; reply_markup?: unknown }> = [];
+    const api: TelegramApi = {
+      sendMessage: async (chatId, text, opts) => {
+        sent.push({ chatId, text, reply_markup: (opts as { reply_markup?: unknown })?.reply_markup });
+        return { message_id: 100 };
+      },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+
+    await gateway.handlePiEvent({
+      type: "response",
+      command: "get_available_thinking_levels",
+      success: true,
+      data: { levels: ["off", "low", "high"] },
+    });
+
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.chatId).toBe(123);
+    expect(sent[0]!.text).toContain("💭 Available thinking levels (3)");
+    expect(sent[0]!.text).toContain("off\nlow\nhigh");
+    const kb = (sent[0]!.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }).inline_keyboard;
+    expect(kb[0]!.map(b => b.callback_data)).toEqual(["think:off", "think:low", "think:high"]);
+  });
+
+  it("renders friendly message when no thinking levels available", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+
+    await gateway.handlePiEvent({
+      type: "response",
+      command: "get_available_thinking_levels",
+      success: true,
+      data: { levels: [] },
+    });
+
+    expect(sent).toEqual(["❌ No thinking levels available."]);
+  });
+
+  it("confirms set_thinking_level with the wired level and clears pending state", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+    gateway.pendingThinkLevel.set(123, "high");
+
+    await gateway.handlePiEvent({ type: "response", command: "set_thinking_level", success: true });
+    expect(sent).toEqual(["\uD83D\uDCAD Thinking level: high"]);
+    expect(gateway.pendingThinkLevel.has(123)).toBe(false);
+  });
+
+  it("clears pending think level on set_thinking_level error", async () => {
+    const sent: string[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+    gateway.lastChatId = 123;
+    gateway.pendingThinkLevel.set(123, "bogus");
+
+    await gateway.handlePiEvent({ type: "response", command: "set_thinking_level", success: false, error: "invalid level" });
+    expect(sent).toEqual([]);
+    expect(gateway.pendingThinkLevel.has(123)).toBe(false);
+  });
+
   it("accumulates tool counts across multiple turns", async () => {
     const sent: string[] = [];
     const api: TelegramApi = {
