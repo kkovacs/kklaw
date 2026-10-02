@@ -135,16 +135,12 @@ function toolArgPreview(toolName: string, args: Record<string, unknown> | undefi
 // Gateway: all mutable state + business logic
 // ============================================================
 
-interface QueuedMessage {
-  chatId: number | string;
-  text: string;
-  images?: ImageContent[];
-}
-
 export class Gateway {
   piClient: PiClient | null = null;
   piStreaming = false;
-  queue: QueuedMessage[] = [];
+  // Pending steer RPCs: id → handler called with the response. Delivers the
+  // message as a fresh prompt run when pi did not queue the steer.
+  steerFallbacks: Map<string, (resp: PiResponse) => void> = new Map();
   currentRelay: Relay | null = null;
   lastChatId: number | string = 0;
   currentChatId: number | string = 0;
@@ -246,6 +242,11 @@ export class Gateway {
               .catch((err: Error) => console.error(`[telegram] bash result failed: ${err.message}`));
           }
         }
+      }
+      if (resp.command === "steer" && resp.id) {
+        const fallback = this.steerFallbacks.get(resp.id);
+        this.steerFallbacks.delete(resp.id);
+        fallback?.(resp);
       }
       return;
     }
@@ -479,12 +480,26 @@ export class Gateway {
     this.sendPi(cmd);
   }
 
-  processQueue(api: TelegramApi = this.api): void {
-    dbg(1, `processQueue: piStreaming=${this.piStreaming} queue.length=${this.queue.length}`);
-    if (this.piStreaming) return;
-    const next = this.queue.shift();
-    if (!next) return;
-    this.startPiSession(next.chatId, next.text, api, next.images);
+  // Steer a message into pi's current run. Falls back to a fresh prompt run if
+  // pi rejects the steer (e.g. sent right at agent_end — piStreaming is only
+  // cleared on agent_settled, so that race can happen) or an input handler
+  // consumed it without starting work (disposition "handled").
+  steerPi(
+    chatId: number | string,
+    text: string,
+    api: TelegramApi = this.api,
+    images?: ImageContent[],
+  ): void {
+    const id = `steer-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    this.steerFallbacks.set(id, (resp: PiResponse) => {
+      const d = resp.data as { disposition?: string } | undefined;
+      if (resp.success && d?.disposition === "queued") return;
+      dbg(1, `steer not queued (success=${resp.success} disposition=${d?.disposition}), resending as prompt`);
+      void this.startPiSession(chatId, text, api, images);
+    });
+    const cmd: Record<string, unknown> = { type: "steer", id, message: text };
+    if (images && images.length > 0) cmd.images = images;
+    this.sendPi(cmd);
   }
 
   resetSession(caller: string): void {
@@ -494,7 +509,6 @@ export class Gateway {
     this.piStreaming = false;
     this.turnToolCounts.clear();
     this.toolMessages.clear();
-    this.queue = [];
     this.currentChatId = 0;
     this.currentPlaceholderMessageId = 0;
     this.lastPiError = undefined;
@@ -574,7 +588,6 @@ export class Gateway {
       `📡 Pi streaming: ${streaming}`,
       `📁 Session:      ${this.currentSessionId ? this.currentSessionId.slice(-12) : "none"}`,
       `📑 Cached sessions: ${this.sessionPicker.size}`,
-      `📋 Queue depth:  ${this.queue.length}`,
       `🔧 Active tools: ${this.toolMessages.size}`,
     ];
     const text = `<pre>${lines.join("\n")}</pre>`;
@@ -739,8 +752,8 @@ export class Gateway {
     dbg(1, `injectPrompt file=${filename} chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
     if (this.piStreaming) {
-      dbg(1, `pi busy, queuing injected prompt (queue.length=${this.queue.length})`);
-      this.queue.push({ chatId, text });
+      dbg(1, `pi busy, steering injected prompt`);
+      this.steerPi(chatId, text);
       return;
     }
 
@@ -778,9 +791,9 @@ export class Gateway {
     }
 
     if (this.piStreaming) {
-      dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
-      this.queue.push({ chatId: ctx.chatId, text });
+      dbg(1, `pi busy, steering message`);
       await ctx.react("👀");
+      this.steerPi(ctx.chatId, text, api);
       return;
     }
 
@@ -829,9 +842,9 @@ export class Gateway {
     }
 
     if (this.piStreaming) {
-      dbg(1, `pi busy, queuing message (queue.length=${this.queue.length})`);
-      this.queue.push({ chatId: ctx.chatId, text, images });
+      dbg(1, `pi busy, steering message`);
       await ctx.react("👀");
+      this.steerPi(ctx.chatId, text, api, images);
       return;
     }
 
@@ -923,9 +936,9 @@ export class Gateway {
     await ctx.reply(`🎤 ${htmlEscape(prompt)}`, { parse_mode: "HTML" }).catch(() => {});
 
     if (this.piStreaming) {
-      dbg(1, `pi busy, queuing voice message (queue.length=${this.queue.length})`);
-      this.queue.push({ chatId: ctx.chatId, text: prompt });
+      dbg(1, `pi busy, steering voice message`);
       await ctx.react("👀");
+      this.steerPi(ctx.chatId, prompt, api);
       return;
     }
 
@@ -1004,8 +1017,8 @@ if (import.meta.main) {
     gateway.currentRelay = null;
     gateway.piStreaming = false;
     gateway.turnToolCounts.clear();
-    gateway.queue = [];
     gateway.sendPi({ type: "abort" });
+    // XXX: steer messages queued in pi survive abort until task c adds clear_queue
     await ctx.reply("🛑 Aborted.");
   });
 
@@ -1189,7 +1202,7 @@ if (import.meta.main) {
     { command: "delete",    description: "Delete the current session and start a new one" },
     { command: "abort",     description: "Abort the current agent turn" },
     { command: "abort_bash",description: "Abort the running bash command" },
-    { command: "status",    description: "Show daemon status (uptime, Pi state, queue)" },
+    { command: "status",    description: "Show daemon status (uptime, Pi state)" },
     { command: "session",   description: "Show session state (model, messages, thinking)" },
     { command: "name",      description: "Set a display name for the current session" },
     { command: "quit",      description: "Exit the daemon" },

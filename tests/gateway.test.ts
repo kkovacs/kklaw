@@ -90,7 +90,6 @@ describe("Gateway.handleTextMessage", () => {
 
     await gateway.handleTextMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(0);
     expect(gateway.piStreaming).toBe(false);
     expect(replied).toBe(false);
   });
@@ -103,13 +102,14 @@ describe("Gateway.handleTextMessage", () => {
     await gateway.handleTextMessage(ctx, api);
 
     expect(gateway.piStreaming).toBe(true);
-    expect(gateway.queue.length).toBe(0);
   });
 
-  it("queues message and reacts with hourglass when pi is busy", async () => {
+  it("steers message and reacts when pi is busy", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true; // simulate busy
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
 
     const ctx = mockContext({ msg: { text: "second msg" } });
     const reactions: string[] = [];
@@ -117,8 +117,11 @@ describe("Gateway.handleTextMessage", () => {
 
     await gateway.handleTextMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(1);
-    expect(gateway.queue[0]!.text).toBe("second msg");
+    expect(piCommands).toEqual([{
+      type: "steer",
+      id: expect.any(String),
+      message: "second msg",
+    }]);
     expect(reactions).toEqual(["👀"]);
   });
 
@@ -133,32 +136,86 @@ describe("Gateway.handleTextMessage", () => {
   });
 });
 
-describe("Gateway.processQueue", () => {
-  it("processes queued messages after pi becomes idle", async () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.queue.push({ chatId: 123, text: "queued msg" });
-    gateway.piStreaming = false;
+describe("Gateway.steerPi", () => {
+  function steerGateway() {
+    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    return { gateway, piCommands };
+  }
 
-    gateway.processQueue(api);
+  it("sends steer RPC with message", () => {
+    const { gateway, piCommands } = steerGateway();
 
-    expect(gateway.piStreaming).toBe(true);
-    expect(gateway.queue.length).toBe(0);
+    gateway.steerPi(123, "steered text");
+
+    expect(piCommands).toEqual([{
+      type: "steer",
+      id: expect.any(String),
+      message: "steered text",
+    }]);
   });
 
-  it("does nothing when pi is still streaming", async () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.queue.push({ chatId: 123, text: "queued msg" });
+  it("includes images in the steer RPC when present", () => {
+    const { gateway, piCommands } = steerGateway();
+
+    gateway.steerPi(123, "look", undefined, [
+      { type: "image", data: "aa==", mimeType: "image/png" },
+    ]);
+
+    expect(piCommands[0]).toEqual({
+      type: "steer",
+      id: expect.any(String),
+      message: "look",
+      images: [{ type: "image", data: "aa==", mimeType: "image/png" }],
+    });
+  });
+
+  it("takes no further action on disposition=queued", async () => {
+    const { gateway, piCommands } = steerGateway();
     gateway.piStreaming = true;
+    gateway.steerPi(123, "steered text");
+    const id = (piCommands[0] as { id?: string }).id;
 
-    gateway.processQueue(api);
+    await gateway.handlePiEvent({
+      type: "response", command: "steer", id, success: true,
+      data: { disposition: "queued" },
+    });
 
-    expect(gateway.queue.length).toBe(1);
+    expect(piCommands.length).toBe(1);
+    expect(gateway.piStreaming).toBe(true); // run continues, pi delivers the steer
+  });
+
+  it("falls back to a fresh prompt run on disposition=handled", async () => {
+    const { gateway, piCommands } = steerGateway();
+    gateway.steerPi(123, "steered text");
+    const id = (piCommands[0] as { id?: string }).id;
+
+    // Input handler consumed the steer without starting work
+    await gateway.handlePiEvent({
+      type: "response", command: "steer", id, success: true,
+      data: { disposition: "handled" },
+    });
+
+    expect(piCommands.length).toBe(2);
+    expect(piCommands[1]).toEqual({ type: "prompt", message: "steered text" });
     expect(gateway.piStreaming).toBe(true);
   });
 
+  it("falls back to a fresh prompt run on failed steer response", async () => {
+    const { gateway, piCommands } = steerGateway();
+    gateway.piStreaming = true;
+    gateway.steerPi(123, "steered text");
+    const id = (piCommands[0] as { id?: string }).id;
 
+    // e.g. message raced with agent_settled and pi already settled
+    await gateway.handlePiEvent({
+      type: "response", command: "steer", id, success: false, error: "not streaming",
+    });
+
+    expect(piCommands.length).toBe(2);
+    expect(piCommands[1]).toEqual({ type: "prompt", message: "steered text" });
+  });
 });
 
 describe("Gateway.sendTyping", () => {
@@ -234,22 +291,25 @@ describe("Gateway.handlePiEvent", () => {
     expect(edits).toEqual(["hi"]);
   });
 
-  it("clears state on agent_end and processes queue", async () => {
+  it("keeps piStreaming true across agent_end; agent_settled resets idle state", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
 
     // Start a session
     await gateway.startPiSession(123, "first");
     expect(gateway.piStreaming).toBe(true);
+    gateway.currentPlaceholderMessageId = 55;
 
-    // Queue a second message
-    gateway.queue.push({ chatId: 123, text: "second" });
-
-    // Simulate agent_end
+    // agent_end closes only one low-level agent run — retries/steering may continue
     await gateway.handlePiEvent({ type: "agent_end" });
+    expect(gateway.piStreaming).toBe(true);
+    expect(gateway.currentChatId).toBe(123);
 
-    expect(gateway.piStreaming).toBe(true); // second session started
-    expect(gateway.queue.length).toBe(0);
+    // agent_settled is the true idle signal
+    await gateway.handlePiEvent({ type: "agent_settled" });
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.currentChatId).toBe(0);
+    expect(gateway.currentPlaceholderMessageId).toBe(0);
   });
 
   it("sends tool summary on agent_end with tool counts", async () => {
@@ -574,6 +634,9 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(edits.length).toBe(1);
     expect(edits[0]!.text).toBe("❌ Error: provider validation failed");
+    // Error still surfaces at agent_end; idle only at agent_settled
+    expect(gateway.piStreaming).toBe(true);
+    await gateway.handlePiEvent({ type: "agent_settled" });
     expect(gateway.piStreaming).toBe(false);
   });
 
@@ -598,6 +661,9 @@ describe("Gateway.handlePiEvent", () => {
 
     expect(sent.length).toBe(1);
     expect(sent[0]!.text).toBe("❌ Error: provider validation failed");
+    // Error still surfaces at agent_end; idle only at agent_settled
+    expect(gateway.piStreaming).toBe(true);
+    await gateway.handlePiEvent({ type: "agent_settled" });
     expect(gateway.piStreaming).toBe(false);
   });
 
@@ -816,6 +882,9 @@ describe("Integration: replay recorded fixture", () => {
     // Wait for any remaining async work after agent_end
     await new Promise((r) => setTimeout(r, 50));
 
+    // Fixture predates agent_settled (recorded on pi 0.80.x); send it to reach idle
+    await gateway.handlePiEvent({ type: "agent_settled" });
+
     expect(gateway.piStreaming).toBe(false);
     expect(edits.length).toBeGreaterThan(0);
 
@@ -835,18 +904,16 @@ describe("Integration: replay recorded fixture", () => {
 });
 
 describe("Gateway.resetSession", () => {
-  it("clears relay, queue, and streaming state", async () => {
+  it("clears relay and streaming state", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
-    gateway.queue.push({ chatId: 123, text: "pending" });
     await gateway.startPiSession(123, "active");
     expect(gateway.currentRelay).toBeNull();
 
     gateway.resetSession("test");
 
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
     expect(gateway.currentRelay).toBeNull();
   });
 
@@ -1060,7 +1127,6 @@ describe("Gateway.showDaemonStatus", () => {
     expect(messages[0]!.text).toContain("Uptime:");
     expect(messages[0]!.text).toContain("not connected");
     expect(messages[0]!.text).toContain("idle");
-    expect(messages[0]!.text).toContain("Queue depth:");
     expect(messages[0]!.text).toContain("Session:");
     expect(messages[0]!.text).toContain("Cached sessions:");
   });
@@ -1095,19 +1161,18 @@ describe("Gateway.showDaemonStatus", () => {
     expect(messages[0]!.text).toContain("busy");
   });
 
-  it("shows queue depth when messages are queued", async () => {
+  it("shows queue-free status when messages arrive", async () => {
     const messages: { text: string }[] = [];
     const api: TelegramApi = {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
     const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.queue = [{ chatId: 123, text: "a" }, { chatId: 123, text: "b" }, { chatId: 123, text: "c" }];
 
     await gateway.showDaemonStatus(1);
 
     expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("Queue depth:  3");
+    expect(messages[0]!.text).not.toContain("Queue depth");
   });
 
   it("shows session ID short form when currentSessionId is set", async () => {
@@ -2024,7 +2089,6 @@ describe("Gateway.handlePhotoMessage", () => {
 
     await gateway.handlePhotoMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(0);
     expect(gateway.piStreaming).toBe(false);
     expect(replied).toBe(false);
   });
@@ -2100,26 +2164,30 @@ describe("Gateway.handlePhotoMessage", () => {
 
     expect(replies).toEqual(["Failed to download photo."]);
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
   });
 
-  it("queues message with images when pi is busy", async () => {
+  it("steers message with images when pi is busy", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     gateway.downloadFile = async () => Buffer.from("busy-img");
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
     const reactions: string[] = [];
     const ctx = mockPhotoContext();
     ctx.react = async (emoji) => { reactions.push(emoji); };
 
     await gateway.handlePhotoMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(1);
-    expect(gateway.queue[0]!.text).toBe("what's in this photo");
-    expect(gateway.queue[0]!.images).toEqual([{
-      type: "image",
-      data: Buffer.from("busy-img").toString("base64"),
-      mimeType: "image/jpeg",
+    expect(piCommands).toEqual([{
+      type: "steer",
+      id: expect.any(String),
+      message: "what's in this photo",
+      images: [{
+        type: "image",
+        data: Buffer.from("busy-img").toString("base64"),
+        mimeType: "image/jpeg",
+      }],
     }]);
     expect(reactions).toEqual(["👀"]);
   });
@@ -2157,25 +2225,6 @@ describe("Gateway.handlePhotoMessage", () => {
 
     expect(replies).toEqual(["📤 Not saved (UPLOAD_DIR not set), directly sending to Pi…"]);
     expect(gateway.piStreaming).toBe(true);
-  });
-
-  it("processQueue dequeues message with images and starts session", async () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.downloadFile = async () => Buffer.from("img");
-    gateway.sendPi = () => {};
-
-    gateway.queue.push({
-      chatId: 123,
-      text: "see this",
-      images: [{ type: "image", data: "aa==", mimeType: "image/png" }],
-    });
-    gateway.piStreaming = false;
-
-    gateway.processQueue(api);
-
-    expect(gateway.piStreaming).toBe(true);
-    expect(gateway.queue.length).toBe(0);
   });
 
   it("startPiSession includes images in RPC command", async () => {
@@ -2271,10 +2320,9 @@ describe("Gateway.handleDocumentMessage", () => {
 
     expect(replies).toEqual(["❌ UPLOAD_DIR is not set. Cannot save document."]);
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
   });
 
-  it("does NOT start Pi session or queue (documents are never auto-passed)", async () => {
+  it("does NOT start Pi session (documents are never auto-passed)", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.sendPi = () => {};
@@ -2288,7 +2336,6 @@ describe("Gateway.handleDocumentMessage", () => {
     await gateway.handleDocumentMessage(ctx, api);
 
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
   });
 });
 
@@ -2348,7 +2395,7 @@ describe("Gateway.injectPrompt", () => {
     expect(piCommands).toEqual([{ type: "prompt", message: "prompt text" }]);
   });
 
-  it("queues the message when pi is busy", () => {
+  it("steers the message when pi is busy", () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     const piCommands: Record<string, unknown>[] = [];
@@ -2357,30 +2404,13 @@ describe("Gateway.injectPrompt", () => {
     gateway.piStreaming = true;
     gateway.currentChatId = 789;
 
-    gateway.injectPrompt("queued prompt", "test.txt");
+    gateway.injectPrompt("steered prompt", "test.txt");
 
-    expect(gateway.queue.length).toBe(1);
-    expect(gateway.queue[0]).toEqual({ chatId: 789, text: "queued prompt" });
-    // sendPi was NOT called
-    expect(piCommands.length).toBe(0);
-  });
-
-  it("appends to existing queue when busy", () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-
-    gateway.piStreaming = true;
-    gateway.currentChatId = 999;
-    gateway.queue.push({ chatId: 999, text: "first" });
-
-    gateway.injectPrompt("second", "test.txt");
-
-    expect(gateway.queue.length).toBe(2);
-    expect(gateway.queue[0]).toEqual({ chatId: 999, text: "first" });
-    expect(gateway.queue[1]).toEqual({ chatId: 999, text: "second" });
-    expect(piCommands.length).toBe(0);
+    expect(piCommands).toEqual([{
+      type: "steer",
+      id: expect.any(String),
+      message: "steered prompt",
+    }]);
   });
 });
 
@@ -2475,12 +2505,11 @@ describe("Gateway.handleTextMessage (! commands)", () => {
     const ctx = mockContext({ from: { id: 111 }, msg: { text: "!rm -rf /" } });
     await gateway.handleTextMessage(ctx, api);
 
-    // Unauthorized — no sendPi, no queue
+    // Unauthorized — no sendPi
     expect(piCommands.length).toBe(0);
-    expect(gateway.queue.length).toBe(0);
   });
 
-  it("!command bypasses busy queue (always fires immediately)", async () => {
+  it("!command bypasses busy path (always fires immediately)", async () => {
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true; // simulate busy
@@ -2491,9 +2520,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
     const ctx = mockContext({ msg: { text: "!df -h" } });
     await gateway.handleTextMessage(ctx, api);
 
-    // Bash commands bypass the queue regardless of stream state
+    // Bash commands bypass the steer path regardless of stream state
     expect(piCommands).toEqual([{ type: "bash", command: "df -h" }]);
-    expect(gateway.queue.length).toBe(0);
   });
 });
 
@@ -2508,7 +2536,6 @@ describe("Gateway.handleVoiceMessage", () => {
 
     await gateway.handleVoiceMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(0);
     expect(gateway.piStreaming).toBe(false);
     expect(replied).toBe(false);
   });
@@ -2527,7 +2554,6 @@ describe("Gateway.handleVoiceMessage", () => {
 
     expect(replies).toEqual(["❌ UPLOAD_DIR is not set. Cannot save voice message."]);
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
   });
 
   it("ignores voice message with missing file_id", async () => {
@@ -2555,7 +2581,6 @@ describe("Gateway.handleVoiceMessage", () => {
 
     expect(replies).toEqual(["Failed to download voice message."]);
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
   });
 
   it("replies 'Failed to save voice message.' when saveUpload returns null", async () => {
@@ -2573,7 +2598,6 @@ describe("Gateway.handleVoiceMessage", () => {
 
     expect(replies).toEqual(["Failed to save voice message."]);
     expect(gateway.piStreaming).toBe(false);
-    expect(gateway.queue.length).toBe(0);
   });
 
   it("starts a session with voice prompt when pi is idle", async () => {
@@ -2599,13 +2623,15 @@ describe("Gateway.handleVoiceMessage", () => {
     expect(gateway.piStreaming).toBe(true);
   });
 
-  it("queues voice prompt and reacts when pi is busy", async () => {
+  it("steers voice prompt and reacts when pi is busy", async () => {
     process.env.UPLOAD_DIR = "/uploads";
     const api = mockApi();
     const gateway = new Gateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     gateway.downloadFile = async () => Buffer.from("busy-ogg");
     gateway.saveUpload = async () => "/uploads/voice_busy.ogg";
+    const piCommands: Record<string, unknown>[] = [];
+    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
 
     const reactions: string[] = [];
     const ctx = mockVoiceContext();
@@ -2613,9 +2639,11 @@ describe("Gateway.handleVoiceMessage", () => {
 
     await gateway.handleVoiceMessage(ctx, api);
 
-    expect(gateway.queue.length).toBe(1);
-    expect(gateway.queue[0]!.text).toBe("voice message from user: /uploads/voice_busy.ogg");
-    expect(gateway.queue[0]!).not.toHaveProperty("images");
+    expect(piCommands).toEqual([{
+      type: "steer",
+      id: expect.any(String),
+      message: "voice message from user: /uploads/voice_busy.ogg",
+    }]);
     expect(reactions).toEqual(["👀"]);
   });
 });

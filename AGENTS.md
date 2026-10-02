@@ -14,11 +14,12 @@ Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API util
 ## Pipeline
 
 1. Telegram text/photo/document/voice → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`, and if `UPLOAD_DIR` is set also saved to disk with a timestamp-based name (e.g. `1747380800000.jpeg`) — a `📎 Saved: <code>&lt;full_path&gt;</code> — Sending to Pi…` reply confirms the save; otherwise `📤 Not saved (UPLOAD_DIR not set), directly sending to Pi…` is shown. Photos are auto-passed to Pi as `ImageContent[]` with the caption as prompt text. Documents: downloaded and saved to `UPLOAD_DIR` with original `file_name` preserved — the user gets a `📎 Saved: <code>&lt;full_path&gt;</code> — Pi can access it but was not notified.` reply. Documents are **never** auto-passed to the LLM; the user must send a follow-up text prompt referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, document uploads are rejected with `❌ UPLOAD_DIR is not set. Cannot save document.`. Voice messages: downloaded and saved to `UPLOAD_DIR` as `voice_<timestamp>.ogg`; Pi is then prompted with `voice message from user: <full_path>` so an audio-capable model can read the file itself. If `UPLOAD_DIR` is not set, voice uploads are rejected with `❌ UPLOAD_DIR is not set. Cannot save voice message.`.
-2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos/documents). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`).
+2. If pi idle → send `{"type":"prompt"}` (with optional `images` for photos/documents). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`/`agent_settled`).
 3. Pi's `message_start` (assistant role) → creates a new Telegram placeholder message + per-message `Relay`. `message_update`/`text_delta` → current relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
 4. `message_end` → finalizes current relay. If no content produced (tool-call-only message), the placeholder is deleted. If an error arrived with no content, the placeholder is edited to show the error.
-5. On `agent_end` → safety-net finalization of any remaining relay, error surfacing fallback (guarded by `piErrorSent` flag), tool summary, clear state, process next queued message.
-6. If pi busy → message queued FIFO (in-memory), `👀` reaction added to the message via `ctx.react()`.
+5. On `agent_end` → safety-net finalization of any remaining relay, error surfacing fallback (guarded by `piErrorSent` flag), tool summary. `agent_end` closes only one low-level agent run — retries/recovery/steering may continue, so `piStreaming` stays true.
+6. On `agent_settled` (pi will not continue automatically) → `piStreaming = false`, reset run state. This is the true idle signal.
+7. If pi busy → message forwarded to the current run via the `steer` RPC (`Gateway.steerPi()`, with `images` when present), `👀` reaction added via `ctx.react()`. Pi delivers it after the current turn's tool calls; the steering queue lives in the pi process (survives gateway restarts).
 
 ### Telegram allowed reaction emoji
 
@@ -115,11 +116,11 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | Telegram command | RPC command | Response |
 |------------------|-------------|----------|
 | `/new` | `new_session` → (response handler) `get_state` | cancels relay + resets state; shows new session status |
-| `/abort` | `abort` | cancels relay, clears streaming state, empties queue; replies "🛑 Aborted." |
+| `/abort` | `abort` | cancels relay, clears streaming state; replies "🛑 Aborted." XXX: steer messages queued in pi survive abort until `clear_queue` is wired up |
 | `/abort_bash` | `abort_bash` | replies "🛑 Bash aborted." |
 | `/session` | `get_state` + `get_session_stats` | `showStatus()` + `showStats()` — two `<pre>` HTML messages |
 | `/last` | `get_last_assistant_text` | `showLastMessage()` with MarkdownV2 escaping |
-| `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state, queue |
+| `/status` | (none) | `showDaemonStatus()` — uptime, Pi pid, streaming state |
 | `/resume` | (none; filesystem scan) → button → `switch_session` → (response handler) `get_state` | scans session dir for recent `.jsonl` files, shows inline keyboard; button click fires `switch_session` RPC → `get_state` to show new session status |
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
@@ -133,7 +134,9 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 - **Gateway class** accepts injectable `TelegramApi` and download/delete functions — testable with mocks.
 - **JSONL framer** is custom: Node's `readline` splits on `U+2028`/`U+2029` which are valid in JSON strings. Custom `\n`-only splitter with `\r` strip.
 - **Debounced streaming**: buffer accumulates deltas, `editMessageText` fires on a timer, final edit on `message_end`. New `Relay` created per assistant `message_start`; each Pi message maps to one Telegram message.
-- **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end` don't trigger it.
+- **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end`/`agent_settled` don't trigger it.
+- **Idle detection**: `piStreaming` is cleared only on `agent_settled`, not `agent_end` — post-agent_end events (retries, compaction, steered turns) still route to the active chat.
+- **Mid-run forwarding via steer**: busy-path messages send `steer` with a generated correlation id; the response handler (`steerFallbacks`) resends the message as a fresh `prompt` run when the steer is rejected (e.g. sent right at `agent_end` — the agent_end→agent_settled race) or consumed with `disposition: "handled"` without starting work. `disposition: "queued"` needs no action.
 - **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).
 - **MarkdownV2 escape**: relaxed escape — `*` `_` `` ` `` pass through for Pi's formatting; all other reserved chars (`[`, `(`, `~`, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`, `\`) escaped.
 - **Response routing**: a single `lastChatId` field routes all command responses (status, stats, bash output, model lists, last message). `deleteInProgress` flag (boolean) — not a separate chat ID — triggers delete-specific logic on `get_state` responses alongside normal status display. 
@@ -148,7 +151,6 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 ## Known gaps (marked `XXX` in code)
 
 - Extension UI dialogs (`select`, `confirm`, `input`, `editor`) not forwarded to user
-- Message queue is in-memory — lost on gateway restart
 - Unauthorized users are silently ignored (no rejection reply)
 - `/resume` shows limited results; no pagination
 - Photo media group debouncing not implemented
