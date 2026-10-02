@@ -1086,6 +1086,33 @@ describe("Gateway.showCompact", () => {
     expect(messages[0]!.text).toContain("2.5M tokens");
   });
 
+  it("shows estimatedTokensAfter line when present", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showCompact(1, { tokensBefore: 150_000, estimatedTokensAfter: 32_000 });
+
+    expect(messages[0]!.text).toContain("📥 Context before: 150.0K tokens");
+    expect(messages[0]!.text).toContain("🔄 Context after: ~32.0K tokens (est.)");
+  });
+
+  it("formats estimatedTokensAfter with M suffix for large counts", async () => {
+    const messages: { text: string }[] = [];
+    const api: TelegramApi = {
+      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
+      editMessageText: async () => ({}),
+    };
+    const gateway = new Gateway({ allowedUserId: 1, api });
+
+    await gateway.showCompact(1, { estimatedTokensAfter: 1_200_000 });
+
+    expect(messages[0]!.text).toContain("🔄 Context after: ~1.2M tokens (est.)");
+  });
+
   it("omits tokensBefore line when not present in data", async () => {
     const messages: { text: string }[] = [];
     const api: TelegramApi = {

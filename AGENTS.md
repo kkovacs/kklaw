@@ -125,7 +125,7 @@ Every `get_state` response stores `sessionId` in `Gateway.currentSessionId`. Thi
 | `/name <name>` | `set_session_name` | sets display name on current session; `/name` alone shows usage |
 | `/model [filter]` | `get_available_models` | no filter → `<pre>` list; filter → inline keyboard buttons firing `set_model` RPC |
 | `/think [level]` | `get_available_thinking_levels` (list) / `set_thinking_level` (set) | no args → `<pre>` list + inline keyboard buttons firing `set_thinking_level`; with level → sets it. The set response carries no data echo, so the ack reuses the level saved in `pendingThinkLevel` (keyed by chat id, cleared on success or error) |
-| `/compact [focus]` | `compact` (with optional `customInstructions`) | `showCompact()` on success; `❌ Compaction failed: …` on error |
+| `/compact [focus]` | `compact` (with optional `customInstructions`) | `showCompact()` on success (renders `tokensBefore` + heuristic `estimatedTokensAfter`); `❌ Compaction failed: …` on error |
 | `/delete` | `new_session` → (response handler) `get_state` | uses stored `currentSessionId` to unlink session file, resets, shows new session status |
 | `/quit` | (none) | replies "Bye" then `process.exit(0)` |
 | `!command` / `!!command` | `bash` | runs command via Pi bash RPC, returns output in `<pre>` chunks via response handler — routed to `lastChatId`. `!!` sets `excludeFromContext: true` (output not added to context) |

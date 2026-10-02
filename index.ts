@@ -778,11 +778,14 @@ export class Gateway {
   }
 
   async showCompact(chatId: number | string, data: unknown): Promise<void> {
-    const d = data as { tokensBefore?: number } | undefined;
+    const d = data as { tokensBefore?: number; estimatedTokensAfter?: number } | undefined;
     const tok = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
     const lines = ["🗜️ Compacted"];
     if (d?.tokensBefore != null) {
       lines.push(`📥 Context before: ${tok(d.tokensBefore)} tokens`);
+    }
+    if (d?.estimatedTokensAfter != null) {
+      lines.push(`🔄 Context after: ~${tok(d.estimatedTokensAfter)} tokens (est.)`);
     }
     const text = `<pre>${lines.join("\n")}</pre>`;
     await this.api.sendMessage(chatId, text, { parse_mode: "HTML" }).catch((err: Error) =>
