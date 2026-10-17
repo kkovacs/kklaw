@@ -26,7 +26,5 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  },
-  // Pi extensions are standalone (Pi's types aren't a kklaw dependency)
-  "exclude": ["extensions"]
+  }
 }
