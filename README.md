@@ -128,10 +128,16 @@ bun build ./index.ts --compile --minify --bytecode --outfile kklaw
 ./kklaw
 ```
 
-Every argument after the `--` is passed through to the Pi process that gets started. For example, to start `kklaw` in extra-verbose mode, and always continue the previous session:
+Every argument except `kklaw`'s own `-v`/`-vv`/`-vvv` is passed through to the Pi process that gets started (a `--` before them is optional). For example, to start `kklaw` in extra-verbose mode, and always continue the previous session:
 
 ```bash
-bun run index.ts -vvv -- --continue
+bun run index.ts -vvv --continue
+```
+
+Pi extensions load the same way, with `-e` (repeat it for more):
+
+```bash
+bun run index.ts --continue -e ~/pi-ext/my-extension.ts
 ```
 
 ## Start on boot
@@ -141,7 +147,7 @@ You can use `cron` and `tmux` (or anything else).
 This example runs in a loop with a 5 sec backoff, so to restart `kklaw` just send it `/quit`. If you want a fresh session on every restart, remove `--continue`. If you just hate sessions, add `--no-session`. If you want extensions, keep adding `-e`s. These are all just `pi`'s options.
 
 ```
-@reboot tmux new-session -d -s kklaw 'cd ~/workspace/; while true; do ( set -a ; . .env ; set +a ; bun run ~/kklaw/index.ts -v -- --continue ; sleep 5 ); done'
+@reboot tmux new-session -d -s kklaw 'cd ~/workspace/; while true; do ( set -a ; . .env ; set +a ; bun run ~/kklaw/index.ts -v --continue ; sleep 5 ); done'
 ```
 
 ## Configuration (`.env`)
@@ -177,7 +183,7 @@ Bun auto-loads `.env` from the project root (where `package.json` is), not from 
 | `!command` | Run a shell command via Pi; output goes into LLM context |
 | `!!command` | Run a shell command via Pi; output stays out of LLM context |
 
-All other slash commands are passed down to Pi. (To use skills, etc.) All errors are passed up to you on Telegram.
+All other slash commands are passed down to Pi. (To use skills, extension commands, etc.) All errors are passed up to you on Telegram, and so are extension notifications.
 
 ## Software that pairs nicely with 💅`kklaw`
 

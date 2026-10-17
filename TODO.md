@@ -1,7 +1,7 @@
 Larger features to develop (not at once):
 
 1. [x] Request-id RPC refactor: add `request()` to pi-client.ts and migrate every command to it; honor prompt `disposition: "handled"`/failure so `piStreaming` doesn't stick; drop `steerFallbacks`, `abortPending`, `pendingThinkLevel`, `lastChatId` routing. Update tests and docs (AGENTS.md, README).
-2. [ ] `/undo` as a Pi extension using `ctx.navigateTree()` (same session file, no fork); forward `notify` extension UI events to Telegram. (Separate session, after 1.)
+2. [x] `/undo` as a Pi extension using `ctx.navigateTree()` (same session file, no fork); forward `notify` extension UI events to Telegram. (Separate session, after 1.)
 3. [ ] Drive multiple Pi RPC processes from one kklaw. (Separate session, after 2.)
 
 Someday/maybe:

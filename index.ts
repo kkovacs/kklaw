@@ -377,7 +377,19 @@ export class Gateway {
       return;
     }
 
-    // XXX: other events not handled yet (extension_ui, etc.)
+    // Extension UI: only fire-and-forget notify is forwarded.
+    // XXX: dialogs (select/confirm/input/editor) and other methods not handled
+    if (type === "extension_ui_request") {
+      const e = event as { method?: string; message?: unknown; notifyType?: string };
+      if (e.method === "notify" && typeof e.message === "string") {
+        const icon = e.notifyType === "error" ? "❌" : e.notifyType === "warning" ? "⚠️" : "ℹ️";
+        await this.reply(this.currentChatId || this.allowedUserId, `${icon} ${e.message}`);
+      } else {
+        dbg(1, `unhandled extension_ui_request method: ${e.method}`);
+      }
+      return;
+    }
+
     // Known no-op events we deliberately ignore (avoid log noise):
     if (type === "agent_start" || type === "turn_start" || type === "turn_end") return;
     dbg(1, `unhandled pi event type: ${type}`);
@@ -415,6 +427,9 @@ export class Gateway {
   }
 
   // Resolves after pi's prompt response (preflight), not after the run.
+  // Also called by steerPi() while a run may still be going (rejected steer,
+  // e.g. an extension command like /undo, which pi refuses to queue): then the
+  // run's state is left alone.
   async startPiSession(
     chatId: number | string,
     text: string,
@@ -422,12 +437,15 @@ export class Gateway {
     images?: ImageContent[],
   ): Promise<void> {
     dbg(1, `startPiSession chat=${chatId} text="${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" images=${images?.length ?? 0}`);
+    const busy = this.piStreaming;
     this.piStreaming = true;
     this.currentChatId = chatId;
-    this.lastPiError = undefined;
-    this.piErrorSent = false;
-    this.currentPlaceholderMessageId = 0;
-    this.toolMessages.clear();
+    if (!busy) {
+      this.lastPiError = undefined;
+      this.piErrorSent = false;
+      this.currentPlaceholderMessageId = 0;
+      this.toolMessages.clear();
+    }
 
     const cmd: Record<string, unknown> = { type: "prompt", message: text };
     if (images && images.length > 0) cmd.images = images;
@@ -436,11 +454,14 @@ export class Gateway {
     if (resp.success && disposition !== "handled") return;
 
     // No run started (an extension command consumed the prompt, or pi rejected
-    // it): no agent_settled will follow, so go idle here.
+    // it): no agent_settled will follow, so go idle here — unless a run was
+    // already going, whose agent_settled still will.
     // XXX: messages steered while this prompt was in preflight stay queued in pi
-    dbg(1, `prompt started no run (success=${resp.success} disposition=${disposition})`);
-    this.piStreaming = false;
-    this.currentChatId = 0;
+    dbg(1, `prompt started no run (success=${resp.success} disposition=${disposition} busy=${busy})`);
+    if (!busy) {
+      this.piStreaming = false;
+      this.currentChatId = 0;
+    }
     if (!resp.success) await this.reply(chatId, `❌ ${resp.error ?? "Prompt failed"}`);
   }
 
@@ -1126,9 +1147,9 @@ if (import.meta.main) {
   function spawnPi(): void {
     const args = ["--mode", "rpc"];
 
-    // pass-through args after --
-    const dashDash = process.argv.indexOf("--");
-    if (dashDash !== -1) args.push(...process.argv.slice(dashDash + 1));
+    // Pass through all args except kklaw's own -v/-vv/-vvv. A `--` is dropped
+    // too: optional, and bun strips it anyway when it follows the script name.
+    args.push(...process.argv.slice(2).filter((a) => a !== "--" && !/^-v{1,3}$/.test(a)));
 
     dbg(1, `spawning pi: ${PI_PATH} ${args.join(" ")}`);
 
