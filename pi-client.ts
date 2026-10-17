@@ -1,5 +1,5 @@
 // pi-client.ts — Pi RPC subprocess client
-// Handles spawn, JSONL framing, send, and event callbacks
+// Handles spawn, JSONL framing, send/request, and event callbacks
 
 import { spawn, type ChildProcess } from "node:child_process";
 
@@ -21,9 +21,20 @@ function attachJsonlReader(
   });
 }
 
+export interface PiResponse {
+  type: "response";
+  id?: string;
+  command?: string;
+  success: boolean;
+  error?: string;
+  data?: unknown;
+}
+
 export interface PiClient {
   readonly pid: number | undefined;
-  send(cmd: Record<string, unknown>): void;
+  // Sends cmd with a fresh id; resolves with the matching response. Never
+  // rejects: pi exit/spawn error resolves pending requests with success=false.
+  request(cmd: Record<string, unknown>): Promise<PiResponse>;
   close(): void;
 }
 
@@ -47,11 +58,22 @@ export function createPiClient(options: {
     else process.stderr.write(`[pi] ${data}`);
   });
 
+  // In-flight request() calls: id → resolver. Responses with a known id are
+  // consumed here and not passed to onEvent.
+  const pending = new Map<string, (resp: PiResponse) => void>();
+  let seq = 0;
+  const failPending = (error: string) => {
+    for (const [id, resolve] of pending) resolve({ type: "response", id, success: false, error });
+    pending.clear();
+  };
+
   proc.on("exit", (code: number | null) => {
+    failPending(`pi exited (code=${code})`);
     options.onExit?.(code);
   });
 
   proc.on("error", (err: Error) => {
+    failPending(`pi error: ${err.message}`);
     options.onError?.(err);
   });
 
@@ -66,23 +88,42 @@ export function createPiClient(options: {
       console.error(`[pi] malformed JSON line: ${line.slice(0, 200)}`);
       return;
     }
+    // Only responses: some events (e.g. bash_execution_update) carry the request id too.
+    // Resolved via eventQueue so earlier events are handled before the awaiting caller resumes.
+    const resp = event as PiResponse;
+    if (resp?.type === "response" && resp.id !== undefined) {
+      const resolve = pending.get(resp.id);
+      if (resolve) {
+        pending.delete(resp.id);
+        eventQueue = eventQueue.then(() => resolve(resp));
+        return;
+      }
+    }
     eventQueue = eventQueue.then(() => (options.onEvent(event) as Promise<void> | undefined)?.catch((err: Error) => {
       console.error(`[pi] event handler error: ${err.message}`);
     }));
   });
 
+  function send(cmd: Record<string, unknown>): void {
+    if (!proc.stdin) {
+      console.error("[pi] cannot send command: stdin unavailable");
+      return;
+    }
+    const raw = JSON.stringify(cmd);
+    proc.stdin.write(raw + "\n", (err) => {
+      if (err) console.error(`[pi] stdin write failed: ${err.message}`);
+    });
+  }
+
   return {
     get pid() {
       return proc.pid;
     },
-    send(cmd: Record<string, unknown>): void {
-      if (!proc.stdin) {
-        console.error("[pi] cannot send command: stdin unavailable");
-        return;
-      }
-      const raw = JSON.stringify(cmd);
-      proc.stdin.write(raw + "\n", (err) => {
-        if (err) console.error(`[pi] stdin write failed: ${err.message}`);
+    request(cmd: Record<string, unknown>): Promise<PiResponse> {
+      const id = `r${++seq}`;
+      return new Promise((resolve) => {
+        pending.set(id, resolve);
+        send({ ...cmd, id });
       });
     },
     close(): void {

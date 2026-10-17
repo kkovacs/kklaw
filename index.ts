@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { createRelay, escapeText, type Relay } from "./relay";
-import { createPiClient, type PiClient } from "./pi-client";
+import { createPiClient, type PiClient, type PiResponse } from "./pi-client";
 import { scanSessions, formatSessionDate, type SessionInfo } from "./sessions";
 import { createSafeEditor, htmlEscape, splitTelegramText, downloadTelegramFile, isParseError, type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext, type VoiceMessageContext } from "./telegram";
 import { InjectWatcher } from "./inject";
@@ -20,7 +20,7 @@ function uploadDir(): string | null {
   return (process.env.UPLOAD_DIR ?? "").replace(/^~/, homedir()) || null;
 }
 
-// Verbosity: -v = key events, -vv = + sendPi raw + telegram msg summaries, -vvv = + full JSON + raw pi lines
+// Verbosity: -v = key events, -vv = + requestPi raw + telegram msg summaries, -vvv = + full JSON + raw pi lines
 const verbosity = process.argv.includes("-vvv") ? 3 : process.argv.includes("-vv") ? 2 : process.argv.includes("-v") ? 1 : 0;
 const STREAMING_EVENTS = new Set(["message_update", "message_start", "message_end", "turn_start", "turn_end"]);
 let streamingDots = 0;
@@ -46,15 +46,6 @@ const allowedUserId = parseInt(process.env.TELEGRAM_ALLOWED_USER_ID ?? "", 10);
 // ============================================================
 // Pi protocol types
 // ============================================================
-
-interface PiResponse {
-  type: "response";
-  id?: string;
-  command?: string;
-  success: boolean;
-  error?: string;
-  data?: unknown;
-}
 
 interface PiEvent {
   type: string;
@@ -138,11 +129,7 @@ function toolArgPreview(toolName: string, args: Record<string, unknown> | undefi
 export class Gateway {
   piClient: PiClient | null = null;
   piStreaming = false;
-  // Pending steer RPCs: id → handler called with the response. Delivers the
-  // message as a fresh prompt run when pi did not queue the steer.
-  steerFallbacks: Map<string, (resp: PiResponse) => void> = new Map();
   currentRelay: Relay | null = null;
-  lastChatId: number | string = 0;
   currentChatId: number | string = 0;
   currentPlaceholderMessageId: number = 0;
   toolMessages: Map<string, { msgId: number; startText: string }> = new Map();
@@ -152,20 +139,12 @@ export class Gateway {
   lastTypingSent = 0;
   currentSessionId: string | null = null;
   sessionPicker: Map<string, SessionInfo> = new Map();
-  modelFilter?: string;
-  // Level wired by /think <level>, keyed by routing chat id; consumed on the set ack
-  pendingThinkLevel: Map<number | string, string> = new Map();
   allowedUserId: number;
   api: TelegramApi;
   botToken: string;
   downloadFile = (fileId: string) => downloadTelegramFile(this.api, this.botToken, fileId);
   deleteFile: (path: string) => Promise<void> = unlink;
   startedAt = new Date();
-
-  // /abort replies in flight: clear_queue id → finish(queued). finish sends the
-  // reply exactly once — counts prepended when the response delivered any,
-  // plain "🛑 Aborted." on timeout/resetSession fallback.
-  abortPending: Map<string, (queued?: number) => void> = new Map();
 
   constructor(options: { allowedUserId: number; api: TelegramApi; botToken?: string }) {
     this.allowedUserId = options.allowedUserId;
@@ -188,6 +167,8 @@ export class Gateway {
     }
   }
 
+  // Called by pi-client for every event, in order. Must never await
+  // requestPi(): responses resolve on the same queue, so that would deadlock.
   handlePiEvent = async (event: PiEvent | PiResponse): Promise<void> => {
     const type = event.type;
     if (STREAMING_EVENTS.has(type)) {
@@ -205,77 +186,10 @@ export class Gateway {
       this.sendTyping(this.currentChatId);
     }
 
+    // Responses to requestPi() are consumed by pi-client; anything left here
+    // has an unknown id (e.g. arrived after pi restarted).
     if (type === "response") {
-      const resp = event as PiResponse;
-      if (!resp.success) {
-        console.error(`[pi] error (${resp.command}): ${resp.error}`);
-        if (resp.command === "compact" && this.lastChatId) {
-          this.api.sendMessage(this.lastChatId, `❌ Compaction failed: ${resp.error ?? "unknown error"}`)
-            .catch((err: Error) => console.error(`[telegram] compact error failed: ${err.message}`));
-        }
-        if (resp.command === "set_thinking_level") {
-          this.pendingThinkLevel.delete(this.lastChatId);
-        }
-      } else {
-        dbg(1, `pi response ok: ${resp.command}`);
-        if (resp.command === "new_session") {
-          this.sendPi({ type: "get_state" });
-        }
-        if (resp.command === "switch_session") {
-          this.sendPi({ type: "get_state" });
-        }
-        if (resp.command === "get_state" && this.lastChatId) {
-          const data = resp.data as { sessionId?: string } | undefined;
-          if (data?.sessionId) this.currentSessionId = data.sessionId;
-          this.showStatus(this.lastChatId, resp.data);
-        }
-        if (resp.command === "get_session_stats" && this.lastChatId) {
-          this.showStats(this.lastChatId, resp.data);
-        }
-        if (resp.command === "get_last_assistant_text" && this.lastChatId) {
-          this.showLastMessage(this.lastChatId, resp.data);
-        }
-        if (resp.command === "compact" && this.lastChatId) {
-          this.showCompact(this.lastChatId, resp.data);
-        }
-        if (resp.command === "get_available_models" && this.lastChatId) {
-          this.showModels(this.lastChatId, resp.data);
-        }
-        if (resp.command === "get_available_thinking_levels" && this.lastChatId) {
-          this.showThinkingLevels(this.lastChatId, resp.data);
-        }
-        if (resp.command === "set_thinking_level" && this.lastChatId) {
-          // set_thinking_level response has no data echo (verified in pi rpc-types);
-          // confirm the level we wired in the /think handler
-          const chatId = this.lastChatId;
-          const level = this.pendingThinkLevel.get(chatId) ?? "unknown";
-          this.pendingThinkLevel.delete(chatId);
-          await this.api.sendMessage(chatId, `💭 Thinking level: ${level}`).catch((err: Error) =>
-            console.error(`[telegram] set_thinking_level ack failed: ${err.message}`),
-          );
-        }
-        if (resp.command === "bash" && this.lastChatId) {
-          const d = resp.data as { output?: string; exitCode?: number; truncated?: boolean } | undefined;
-          const header = `Exit code: ${d?.exitCode ?? "?"}${d?.truncated ? " (truncated)" : ""}`;
-          const output = d?.output ?? "(no output)";
-          const combined = `${header}\n\n${output}`;
-          const chunks = splitTelegramText(combined, 3900);
-          for (const chunk of chunks) {
-            await this.api.sendMessage(this.lastChatId, `<pre>${htmlEscape(chunk)}</pre>`, { parse_mode: "HTML" })
-              .catch((err: Error) => console.error(`[telegram] bash result failed: ${err.message}`));
-          }
-        }
-      }
-      if (resp.command === "steer" && resp.id) {
-        const fallback = this.steerFallbacks.get(resp.id);
-        this.steerFallbacks.delete(resp.id);
-        fallback?.(resp);
-      }
-      if (resp.command === "clear_queue" && resp.id) {
-        const finish = this.abortPending.get(resp.id);
-        const d = resp.data as { steering?: string[]; followUp?: string[] } | undefined;
-        finish?.((d?.steering?.length ?? 0) + (d?.followUp?.length ?? 0));
-      }
+      dbg(1, `unmatched pi response: ${(event as PiResponse).command}`);
       return;
     }
 
@@ -479,16 +393,28 @@ export class Gateway {
     });
   }
 
-  sendPi(cmd: Record<string, unknown>): void {
-    const raw = JSON.stringify(cmd);
-    dbg(2, `sendPi: ${raw}`);
+  // Sends a command to pi and resolves with its response (never rejects).
+  // Failures are logged here; callers decide what to show the user.
+  async requestPi(cmd: Record<string, unknown>): Promise<PiResponse> {
+    dbg(2, `requestPi: ${JSON.stringify(cmd)}`);
+    const command = String(cmd.type);
     if (!this.piClient) {
-      console.error(`[pi] cannot send command (pi not connected): ${raw.slice(0, 200)}`);
-      return;
+      console.error(`[pi] cannot send ${command} (pi not connected)`);
+      return { type: "response", command, success: false, error: "pi not connected" };
     }
-    this.piClient.send(cmd);
+    const resp = await this.piClient.request(cmd);
+    if (!resp.success) console.error(`[pi] error (${command}): ${resp.error}`);
+    else dbg(1, `pi response ok: ${command}`);
+    return resp;
   }
 
+  async reply(chatId: number | string, text: string, extra?: Record<string, unknown>): Promise<void> {
+    await this.api.sendMessage(chatId, text, extra).catch((err: Error) =>
+      console.error(`[telegram] reply failed: ${err.message}`),
+    );
+  }
+
+  // Resolves after pi's prompt response (preflight), not after the run.
   async startPiSession(
     chatId: number | string,
     text: string,
@@ -505,55 +431,61 @@ export class Gateway {
 
     const cmd: Record<string, unknown> = { type: "prompt", message: text };
     if (images && images.length > 0) cmd.images = images;
-    this.sendPi(cmd);
+    const resp = await this.requestPi(cmd);
+    const disposition = (resp.data as { disposition?: string } | undefined)?.disposition;
+    if (resp.success && disposition !== "handled") return;
+
+    // No run started (an extension command consumed the prompt, or pi rejected
+    // it): no agent_settled will follow, so go idle here.
+    // XXX: messages steered while this prompt was in preflight stay queued in pi
+    dbg(1, `prompt started no run (success=${resp.success} disposition=${disposition})`);
+    this.piStreaming = false;
+    this.currentChatId = 0;
+    if (!resp.success) await this.reply(chatId, `❌ ${resp.error ?? "Prompt failed"}`);
   }
 
   // Steer a message into pi's current run. Falls back to a fresh prompt run if
   // pi rejects the steer (e.g. sent right at agent_end — piStreaming is only
   // cleared on agent_settled, so that race can happen) or an input handler
   // consumed it without starting work (disposition "handled").
-  steerPi(
+  async steerPi(
     chatId: number | string,
     text: string,
     api: TelegramApi = this.api,
     images?: ImageContent[],
-  ): void {
-    const id = `steer-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    this.steerFallbacks.set(id, (resp: PiResponse) => {
-      const d = resp.data as { disposition?: string } | undefined;
-      if (resp.success && d?.disposition === "queued") return;
-      dbg(1, `steer not queued (success=${resp.success} disposition=${d?.disposition}), resending as prompt`);
-      void this.startPiSession(chatId, text, api, images);
-    });
-    const cmd: Record<string, unknown> = { type: "steer", id, message: text };
+  ): Promise<void> {
+    const cmd: Record<string, unknown> = { type: "steer", message: text };
     if (images && images.length > 0) cmd.images = images;
-    this.sendPi(cmd);
+    const resp = await this.requestPi(cmd);
+    const disposition = (resp.data as { disposition?: string } | undefined)?.disposition;
+    if (resp.success && disposition === "queued") return;
+    dbg(1, `steer not queued (success=${resp.success} disposition=${disposition}), resending as prompt`);
+    await this.startPiSession(chatId, text, api, images);
   }
 
   // Abort pi and drain its steering/follow-up queues. Called by /abort.
   // clear_queue is sent first so pi returns the queued texts instead of
   // running them after abort (abort alone continues the run with queued
-  // messages remaining — pi RPC docs). clear_queue response (or the 1500ms
-  // timeout / resetSession fallback) fires finish() exactly once; finish
-  // deletes the id first, so a late response after timeout is inert.
-  abortPi(chatId: number | string): void {
-    const id = `clear-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const finish = (queued?: number) => {
-      clearTimeout(timer);
-      if (!this.abortPending.delete(id)) return; // already fired (timeout/reset race)
-      const text = queued ? `🛑 Aborted. Cleared ${queued} queued messages.` : "🛑 Aborted.";
-      void this.api.sendMessage(chatId, text).catch((err: Error) =>
-        console.error(`[telegram] abort reply failed: ${err.message}`));
-    };
-    const timer = setTimeout(() => finish(), 1500);
-    this.abortPending.set(id, finish);
-    this.sendPi({ type: "clear_queue", id });
-    this.sendPi({ type: "abort" });
+  // messages remaining — pi RPC docs). Replies plain "🛑 Aborted." if the
+  // clear_queue response takes longer than 1500ms.
+  async abortPi(chatId: number | string): Promise<void> {
+    this.currentRelay?.cancel();
+    this.currentRelay = null;
+    this.piStreaming = false;
+    this.turnToolCounts.clear();
+    const cleared = this.requestPi({ type: "clear_queue" });
+    void this.requestPi({ type: "abort" });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 1500); });
+    const resp = await Promise.race([cleared, timeout]);
+    clearTimeout(timer);
+    const d = resp?.success ? resp.data as { steering?: string[]; followUp?: string[] } | undefined : undefined;
+    const queued = (d?.steering?.length ?? 0) + (d?.followUp?.length ?? 0);
+    await this.reply(chatId, queued ? `🛑 Aborted. Cleared ${queued} queued messages.` : "🛑 Aborted.");
   }
 
   resetSession(caller: string): void {
     dbg(1, `resetSession (${caller})`);
-    for (const [id, finish] of this.abortPending) finish();
     this.currentRelay?.cancel();
     this.currentRelay = null;
     this.piStreaming = false;
@@ -581,7 +513,7 @@ export class Gateway {
     return sessions;
   }
 
-  switchToSession(sessionId: string): void {
+  async switchToSession(chatId: number | string, sessionId: string): Promise<void> {
     const info = this.sessionPicker.get(sessionId);
     if (!info) {
       console.error(`[gateway] switchToSession: session ${sessionId} not in picker`);
@@ -590,7 +522,162 @@ export class Gateway {
 
     dbg(1, `switchToSession: ${info.id} -> ${info.path}`);
     this.resetSession("switchToSession");
-    this.sendPi({ type: "switch_session", sessionPath: info.path });
+    const resp = await this.requestPi({ type: "switch_session", sessionPath: info.path });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ Switch failed: ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.cmdState(chatId);
+  }
+
+  // ------------------------------------------------------------
+  // Slash command handlers — called from the bot wiring at the bottom of this
+  // file. Each awaits its pi response and replies to chatId. The bot wiring
+  // fires them with `void`: grammy handles updates one at a time, so awaiting
+  // a slow command (e.g. /compact) there would block /abort.
+  // ------------------------------------------------------------
+
+  // Also called after /new, /delete, /resume and at startup
+  async cmdState(chatId: number | string): Promise<void> {
+    const resp = await this.requestPi({ type: "get_state" });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ Status failed: ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    const data = resp.data as { sessionId?: string } | undefined;
+    if (data?.sessionId) this.currentSessionId = data.sessionId;
+    await this.showStatus(chatId, resp.data);
+  }
+
+  async cmdNew(chatId: number | string): Promise<void> {
+    this.resetSession("/new");
+    const resp = await this.requestPi({ type: "new_session" });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ New session failed: ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.reply(chatId, "🆕 New session. Ready to roll 🫡");
+    await this.cmdState(chatId);
+  }
+
+  async cmdDelete(chatId: number | string): Promise<void> {
+    const sessionId = this.currentSessionId;
+    if (sessionId) {
+      try {
+        let info = this.sessionPicker.get(sessionId);
+        if (!info) {
+          this.scanRecentSessions();
+          info = this.sessionPicker.get(sessionId);
+        }
+        if (info) {
+          await this.deleteFile(info.path);
+          dbg(1, `deleteSession: unlinked ${info.path}`);
+        } else {
+          console.error(`[delete] session ${sessionId} not found in picker; skipping unlink`);
+        }
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") {
+          console.error(`[delete] unlink failed: ${err?.message ?? err}`);
+        }
+      }
+    } else {
+      console.error("[delete] no current session ID to delete");
+    }
+
+    this.resetSession("/delete");
+    const resp = await this.requestPi({ type: "new_session" });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ New session failed: ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.reply(chatId, "🗑️ Session deleted. New session: standing by 🫡");
+    await this.cmdState(chatId);
+  }
+
+  async cmdSession(chatId: number | string): Promise<void> {
+    const stats = this.requestPi({ type: "get_session_stats" });
+    await this.cmdState(chatId);
+    const resp = await stats;
+    if (resp.success) await this.showStats(chatId, resp.data);
+  }
+
+  async cmdLast(chatId: number | string): Promise<void> {
+    const resp = await this.requestPi({ type: "get_last_assistant_text" });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.showLastMessage(chatId, resp.data);
+  }
+
+  async cmdName(chatId: number | string, name: string): Promise<void> {
+    const resp = await this.requestPi({ type: "set_session_name", name });
+    await this.reply(chatId, resp.success ? "✏️ Named." : `❌ Naming failed: ${resp.error ?? "unknown error"}`);
+  }
+
+  async cmdModels(chatId: number | string, filter?: string): Promise<void> {
+    const resp = await this.requestPi({ type: "get_available_models" });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.showModels(chatId, resp.data, filter);
+  }
+
+  // Returns the text for the model picker message (edited in place by the caller)
+  async setModel(provider: string, modelId: string): Promise<string> {
+    const resp = await this.requestPi({ type: "set_model", provider, modelId });
+    return resp.success
+      ? `✅ Model: ${provider}/${modelId}`
+      : `❌ Model switch failed: ${resp.error ?? "unknown error"}`;
+  }
+
+  async cmdThinkingLevels(chatId: number | string): Promise<void> {
+    const resp = await this.requestPi({ type: "get_available_thinking_levels" });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.showThinkingLevels(chatId, resp.data);
+  }
+
+  async cmdSetThinkingLevel(chatId: number | string, level: string): Promise<void> {
+    const resp = await this.requestPi({ type: "set_thinking_level", level });
+    await this.reply(chatId, resp.success
+      ? `💭 Thinking level: ${level}`
+      : `❌ Thinking level failed: ${resp.error ?? "unknown error"}`);
+  }
+
+  async cmdCompact(chatId: number | string, customInstructions?: string): Promise<void> {
+    const cmd: Record<string, unknown> = { type: "compact" };
+    if (customInstructions) cmd.customInstructions = customInstructions;
+    const resp = await this.requestPi(cmd);
+    if (!resp.success) {
+      await this.reply(chatId, `❌ Compaction failed: ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    await this.showCompact(chatId, resp.data);
+  }
+
+  async cmdAbortBash(chatId: number | string): Promise<void> {
+    const resp = await this.requestPi({ type: "abort_bash" });
+    await this.reply(chatId, resp.success ? "🛑 Bash aborted." : `❌ ${resp.error ?? "unknown error"}`);
+  }
+
+  // !command / !!command from handleTextMessage
+  async runBash(chatId: number | string, command: string, excludeFromContext: boolean): Promise<void> {
+    const resp = await this.requestPi({ type: "bash", command, ...(excludeFromContext ? { excludeFromContext: true } : {}) });
+    if (!resp.success) {
+      await this.reply(chatId, `❌ Bash failed: ${resp.error ?? "unknown error"}`);
+      return;
+    }
+    const d = resp.data as { output?: string; exitCode?: number; truncated?: boolean } | undefined;
+    const header = `Exit code: ${d?.exitCode ?? "?"}${d?.truncated ? " (truncated)" : ""}`;
+    const output = d?.output ?? "(no output)";
+    const chunks = splitTelegramText(`${header}\n\n${output}`, 3900);
+    for (const chunk of chunks) {
+      await this.reply(chatId, `<pre>${htmlEscape(chunk)}</pre>`, { parse_mode: "HTML" });
+    }
   }
 
   async showStatus(chatId: number | string, data: unknown): Promise<void> {
@@ -693,18 +780,17 @@ export class Gateway {
     }
   }
 
-  async showModels(chatId: number | string, data: unknown): Promise<void> {
+  async showModels(chatId: number | string, data: unknown, modelFilter?: string): Promise<void> {
     const d = data as { models?: ModelInfo[] } | undefined;
     const models = d?.models ?? [];
 
-    if (this.modelFilter) {
-      const filter = this.modelFilter.toLowerCase();
+    if (modelFilter) {
+      const filter = modelFilter.toLowerCase();
       const matches = models.filter(m =>
         (m.name ?? "").toLowerCase().includes(filter) ||
         (m.id ?? "").toLowerCase().includes(filter) ||
         `${m.provider ?? ""}/${m.id ?? ""}`.toLowerCase().includes(filter)
       );
-      this.modelFilter = undefined;
 
       if (matches.length === 0) {
         await this.api.sendMessage(chatId, `No models matching "${filter}".`).catch((err: Error) =>
@@ -826,11 +912,11 @@ export class Gateway {
 
     if (this.piStreaming) {
       dbg(1, `pi busy, steering injected prompt`);
-      this.steerPi(chatId, text);
+      void this.steerPi(chatId, text);
       return;
     }
 
-    this.startPiSession(chatId, text);
+    void this.startPiSession(chatId, text);
   }
 
   async handleTextMessage(
@@ -859,18 +945,18 @@ export class Gateway {
         await ctx.reply("Usage: !&lt;command&gt;", { parse_mode: "HTML" });
         return;
       }
-      this.sendPi({ type: "bash", command, ...(excludeFromContext ? { excludeFromContext: true } : {}) });
+      void this.runBash(ctx.chatId, command, excludeFromContext);
       return;
     }
 
     if (this.piStreaming) {
       dbg(1, `pi busy, steering message`);
       await ctx.react("👀");
-      this.steerPi(ctx.chatId, text, api);
+      void this.steerPi(ctx.chatId, text, api);
       return;
     }
 
-    await this.startPiSession(ctx.chatId, text, api);
+    void this.startPiSession(ctx.chatId, text, api);
   }
 
   async handlePhotoMessage(
@@ -917,11 +1003,11 @@ export class Gateway {
     if (this.piStreaming) {
       dbg(1, `pi busy, steering message`);
       await ctx.react("👀");
-      this.steerPi(ctx.chatId, text, api, images);
+      void this.steerPi(ctx.chatId, text, api, images);
       return;
     }
 
-    await this.startPiSession(ctx.chatId, text, api, images);
+    void this.startPiSession(ctx.chatId, text, api, images);
   }
 
   async handleDocumentMessage(
@@ -1011,11 +1097,11 @@ export class Gateway {
     if (this.piStreaming) {
       dbg(1, `pi busy, steering voice message`);
       await ctx.react("👀");
-      this.steerPi(ctx.chatId, prompt, api);
+      void this.steerPi(ctx.chatId, prompt, api);
       return;
     }
 
-    await this.startPiSession(ctx.chatId, prompt, api);
+    void this.startPiSession(ctx.chatId, prompt, api);
   }
 }
 
@@ -1077,28 +1163,21 @@ if (import.meta.main) {
   // All handlers below require auth — enforced by this filter
   bot.filter((ctx) => ctx.from?.id === allowedUserId);
 
-  bot.command("new", async (ctx) => {
+  // Handlers that talk to pi fire gateway.cmd*() with `void` — see the
+  // "Slash command handlers" section of Gateway.
+  bot.command("new", (ctx) => {
     dbg(1, "/new");
-    gateway.resetSession("/new");
-    gateway.sendPi({ type: "new_session" });
-    await ctx.reply("🆕 New session. Ready to roll 🫡");
+    void gateway.cmdNew(ctx.chatId);
   });
 
-  bot.command("abort", async (ctx) => {
+  bot.command("abort", (ctx) => {
     dbg(1, "/abort");
-    gateway.currentRelay?.cancel();
-    gateway.currentRelay = null;
-    gateway.piStreaming = false;
-    gateway.turnToolCounts.clear();
-    // Replies once the clear_queue response (or timeout fallback) lands,
-    // with cleared-steer/follow-up counts when any were pending.
-    gateway.abortPi(ctx.chatId);
+    void gateway.abortPi(ctx.chatId);
   });
 
-  bot.command("abort_bash", async (ctx) => {
+  bot.command("abort_bash", (ctx) => {
     dbg(1, "/abort_bash");
-    gateway.sendPi({ type: "abort_bash" });
-    await ctx.reply("🛑 Bash aborted.");
+    void gateway.cmdAbortBash(ctx.chatId);
   });
 
   bot.command("status", async (ctx) => {
@@ -1106,15 +1185,14 @@ if (import.meta.main) {
     await gateway.showDaemonStatus(ctx.chatId);
   });
 
-  bot.command("session", async (ctx) => {
+  bot.command("session", (ctx) => {
     dbg(1, "/session");
-    gateway.sendPi({ type: "get_state" });
-    gateway.sendPi({ type: "get_session_stats" });
+    void gateway.cmdSession(ctx.chatId);
   });
 
-  bot.command("last", async (ctx) => {
+  bot.command("last", (ctx) => {
     dbg(1, "/last");
-    gateway.sendPi({ type: "get_last_assistant_text" });
+    void gateway.cmdLast(ctx.chatId);
   });
 
   bot.command("name", async (ctx) => {
@@ -1124,40 +1202,12 @@ if (import.meta.main) {
       await ctx.reply("ℹ️ Usage: /name <name>");
       return;
     }
-
-    gateway.sendPi({ type: "set_session_name", name });
-    await ctx.reply("✏️ Named.");
+    void gateway.cmdName(ctx.chatId, name);
   });
 
-  bot.command("delete", async (ctx) => {
+  bot.command("delete", (ctx) => {
     dbg(1, "/delete");
-
-    const sessionId = gateway.currentSessionId;
-    if (sessionId) {
-      try {
-        let info = gateway.sessionPicker.get(sessionId);
-        if (!info) {
-          gateway.scanRecentSessions();
-          info = gateway.sessionPicker.get(sessionId);
-        }
-        if (info) {
-          await gateway.deleteFile(info.path);
-          dbg(1, `deleteSession: unlinked ${info.path}`);
-        } else {
-          console.error(`[delete] session ${sessionId} not found in picker; skipping unlink`);
-        }
-      } catch (err: any) {
-        if (err?.code !== "ENOENT") {
-          console.error(`[delete] unlink failed: ${err?.message ?? err}`);
-        }
-      }
-    } else {
-      console.error("[delete] no current session ID to delete");
-    }
-
-    gateway.resetSession("/delete");
-    gateway.sendPi({ type: "new_session" });
-    await ctx.reply("🗑️ Session deleted. New session: standing by 🫡");
+    void gateway.cmdDelete(ctx.chatId);
   });
 
   bot.command("resume", async (ctx) => {
@@ -1183,7 +1233,7 @@ if (import.meta.main) {
   bot.callbackQuery(/^resume:(.+)$/, async (ctx) => {
 
     const sessionId = ctx.match?.[1];
-    if (!sessionId) return;
+    if (!sessionId || !ctx.chat) return;
 
     const info = gateway.sessionPicker.get(sessionId);
 
@@ -1192,7 +1242,7 @@ if (import.meta.main) {
       return;
     }
 
-    gateway.switchToSession(sessionId);
+    void gateway.switchToSession(ctx.chat.id, sessionId);
     await ctx.answerCallbackQuery("✅ Switched.");
 
     const label = info.name
@@ -1209,35 +1259,21 @@ if (import.meta.main) {
     process.exit(0);
   });
 
-  bot.command("model", async (ctx) => {
+  bot.command("model", (ctx) => {
     dbg(1, "/model");
-    const filter = ctx.match?.trim();
-    gateway.modelFilter = filter || undefined;
-    gateway.sendPi({ type: "get_available_models" });
+    void gateway.cmdModels(ctx.chatId, ctx.match?.trim() || undefined);
   });
 
-  bot.command("think", async (ctx) => {
+  bot.command("think", (ctx) => {
     dbg(1, "/think");
-    if (!ctx.chat) return;
     const level = ctx.match?.trim();
-    if (level) {
-      // set_thinking_level response has no data echo (verified in pi rpc-types),
-      // so remember the level for the confirmation reply
-      gateway.lastChatId = ctx.chat.id;
-      gateway.pendingThinkLevel.set(ctx.chat.id, level);
-      gateway.sendPi({ type: "set_thinking_level", level });
-      return;
-    }
-    gateway.lastChatId = ctx.chat.id;
-    gateway.sendPi({ type: "get_available_thinking_levels" });
+    if (level) void gateway.cmdSetThinkingLevel(ctx.chatId, level);
+    else void gateway.cmdThinkingLevels(ctx.chatId);
   });
 
-  bot.command("compact", async (ctx) => {
+  bot.command("compact", (ctx) => {
     dbg(1, "/compact");
-    const customInstructions = ctx.match?.trim();
-    const cmd: Record<string, unknown> = { type: "compact" };
-    if (customInstructions) cmd.customInstructions = customInstructions;
-    gateway.sendPi(cmd);
+    void gateway.cmdCompact(ctx.chatId, ctx.match?.trim() || undefined);
   });
 
   bot.callbackQuery(/^model:(.+)$/, async (ctx) => {
@@ -1249,19 +1285,18 @@ if (import.meta.main) {
     const provider = data.slice(0, slash);
     const modelId = data.slice(slash + 1);
 
-    gateway.sendPi({ type: "set_model", provider, modelId });
-    await ctx.answerCallbackQuery(`✅ Switched to ${provider}/${modelId}.`);
-    await ctx.editMessageText(`✅ Model: ${provider}/${modelId}`);
+    await ctx.answerCallbackQuery(`🔄 ${provider}/${modelId}…`);
+    void gateway.setModel(provider, modelId).then((text) =>
+      ctx.editMessageText(text).catch((err: Error) =>
+        console.error(`[telegram] model ack failed: ${err.message}`)));
   });
 
   bot.callbackQuery(/^think:(.+)$/, async (ctx) => {
     const level = ctx.match?.[1];
     if (!level || !ctx.chat) return;
-    gateway.lastChatId = ctx.chat.id;
-    gateway.pendingThinkLevel.set(ctx.chat.id, level);
-    gateway.sendPi({ type: "set_thinking_level", level });
     await ctx.answerCallbackQuery(`💭 ${level}…`);
     await ctx.editMessageText(`💭 Setting thinking level: ${level}…`);
+    void gateway.cmdSetThinkingLevel(ctx.chat.id, level);
   });
 
   bot.on("message:text", async (ctx) => {
@@ -1320,8 +1355,7 @@ if (import.meta.main) {
   }
 
   spawnPi();
-  gateway.lastChatId = allowedUserId;
-  gateway.sendPi({ type: "get_state" });
+  void gateway.cmdState(allowedUserId);
   bot.api.sendMessage(allowedUserId, "🫡 kklaw — station green. Ready for tasking.").catch((err: Error) =>
     console.error(`[telegram] welcome send failed: ${err.message}`),
   );
