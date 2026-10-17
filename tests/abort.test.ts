@@ -1,71 +1,54 @@
 import { describe, expect, it } from "bun:test";
 import { Gateway } from "../index";
+import type { PiResponse } from "../pi-client";
 import type { TelegramApi } from "../telegram";
 
-const api: TelegramApi = {
-  sendMessage: async () => ({ message_id: 1 }),
-  editMessageText: async () => undefined,
-};
-
-function makeAbortGateway(): { gateway: Gateway; piCommands: Record<string, unknown>[] } {
+// requestPi stub: records commands; clear_queue resolves with `clearResp`
+// (undefined = never resolves, to exercise the timeout fallback)
+function makeAbortGateway(clearResp?: Partial<PiResponse>): { gateway: Gateway; piCommands: Record<string, unknown>[]; messages: string[] } {
   const piCommands: Record<string, unknown>[] = [];
+  const messages: string[] = [];
+  const api: TelegramApi = {
+    sendMessage: async (_chatId: number | string, text: string) => { messages.push(text); return { message_id: 1 }; },
+    editMessageText: async () => undefined,
+  };
   const gateway = new Gateway({ allowedUserId: 123, api });
-  gateway.sendPi = (cmd) => { piCommands.push(cmd); };
-  return { gateway, piCommands };
+  gateway.requestPi = (cmd) => {
+    piCommands.push(cmd);
+    if (cmd.type === "clear_queue" && !clearResp) return new Promise(() => {});
+    return Promise.resolve({ type: "response", command: String(cmd.type), success: true, ...(cmd.type === "clear_queue" ? clearResp : {}) });
+  };
+  return { gateway, piCommands, messages };
 }
 
 describe("Gateway.abortPi", () => {
-  it("sends clear_queue (with id) before abort", () => {
-    const { gateway, piCommands } = makeAbortGateway();
+  it("sends clear_queue before abort and resets streaming state", () => {
+    const { gateway, piCommands } = makeAbortGateway({ data: { steering: [], followUp: [] } });
+    gateway.piStreaming = true;
+    gateway.turnToolCounts.set("bash", 2);
     void gateway.abortPi(123);
-    expect(piCommands.length).toBe(2);
-    expect(piCommands[0]!.type).toBe("clear_queue");
-    expect(typeof piCommands[0]!.id).toBe("string");
-    expect(piCommands[1]).toEqual({ type: "abort" });
+    expect(piCommands).toEqual([{ type: "clear_queue" }, { type: "abort" }]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.turnToolCounts.size).toBe(0);
   });
 
   it("prepends cleared counts to the abort reply", async () => {
-    const { gateway, piCommands } = makeAbortGateway();
-    const messages: string[] = [];
-    gateway.api = { ...api, sendMessage: async (_chatId: number | string, text: string) => { messages.push(text); return { message_id: 1 } } };
-    const sent = gateway.abortPi(123);
-    const clearId = piCommands[0]!.id as string;
-    expect(gateway.abortPending.has(clearId)).toBe(true);
-
-    // Delivered clear_queue response with 3 queued messages
-    await gateway.handlePiEvent({
-      type: "response", id: clearId, command: "clear_queue", success: true,
-      data: { steering: ["a"], followUp: ["b", "c"] },
-    } as never);
-    expect(gateway.abortPending.has(clearId)).toBe(false);
-    await sent;
+    const { gateway, messages } = makeAbortGateway({ data: { steering: ["a"], followUp: ["b", "c"] } });
+    await gateway.abortPi(123);
     expect(messages).toEqual(["🛑 Aborted. Cleared 3 queued messages."]);
-
-    // Late duplicate response after the entry fired → inert, no second reply
-    await gateway.handlePiEvent({
-      type: "response", id: clearId, command: "clear_queue", success: true,
-      data: { steering: ["a"], followUp: ["b", "c"] },
-    } as never);
-    expect(messages).toEqual(["🛑 Aborted. Cleared 3 queued messages."]);
-
-    // Unknown correlation id → swallowed, no reply
-    await gateway.handlePiEvent({
-      type: "response", id: "clear-bogus", command: "clear_queue", success: true,
-      data: { steering: [], followUp: [] },
-    } as never);
-    expect(gateway.abortPending.size).toBe(0);
   });
 
   it("falls back to a plain abort reply when clear_queue fails", async () => {
-    const { gateway, piCommands } = makeAbortGateway();
-    const messages: string[] = [];
-    gateway.api = { ...api, sendMessage: async (_chatId: number | string, text: string) => { messages.push(text); return { message_id: 1 } } };
-    const sent = gateway.abortPi(123);
-    const clearId = piCommands[0]!.id as string;
-    await gateway.handlePiEvent({
-      type: "response", id: clearId, command: "clear_queue", success: false, error: "boom",
-    } as never);
-    await sent;
+    const { gateway, messages } = makeAbortGateway({ success: false, error: "boom" });
+    await gateway.abortPi(123);
+    expect(messages).toEqual(["🛑 Aborted."]);
+  });
+
+  it("replies plain abort after the 1500ms timeout when clear_queue never answers", async () => {
+    const { gateway, messages } = makeAbortGateway();
+    const started = Date.now();
+    await gateway.abortPi(123);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
     expect(messages).toEqual(["🛑 Aborted."]);
   });
 });

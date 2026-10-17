@@ -1,11 +1,44 @@
-import { describe, it, expect, beforeAll } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from "bun:test";
+import { mkdirSync, mkdtempSync, writeFileSync, utimesSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gateway, extFromMime } from "../index";
 import { type TelegramApi, type MessageContext, type PhotoMessageContext, type DocumentMessageContext, type VoiceMessageContext } from "../telegram";
 import { loadFixtureLines } from "./helpers";
-import type { PiClient } from "../pi-client";
+import type { PiResponse } from "../pi-client";
+
+// Bun loads .env for tests too: never let them write into the real UPLOAD_DIR.
+// Each test starts with a fresh temp dir; tests that need it unset delete it.
+const testUploadRoot = mkdtempSync(join(tmpdir(), "kklaw-test-uploads-"));
+beforeEach(() => {
+  process.env.UPLOAD_DIR = mkdtempSync(join(testUploadRoot, "u-"));
+});
+afterAll(() => rmSync(testUploadRoot, { recursive: true, force: true }));
+
+// Gateway with a fake pi: requestPi() records each command and resolves
+// successfully (prompt → "started", steer → "queued", like a busy-free pi).
+// `respond` overrides fields of the response per command.
+type Responder = (cmd: Record<string, unknown>) => Partial<PiResponse> | undefined;
+const DEFAULT_DISPOSITION: Record<string, string> = { prompt: "started", steer: "queued" };
+function fakePi(gateway: Gateway, respond?: Responder): Record<string, unknown>[] {
+  const piCommands: Record<string, unknown>[] = [];
+  gateway.requestPi = async (cmd) => {
+    piCommands.push(cmd);
+    const disposition = DEFAULT_DISPOSITION[String(cmd.type)];
+    return {
+      type: "response", command: String(cmd.type), success: true,
+      ...(disposition ? { data: { disposition } } : {}),
+      ...respond?.(cmd),
+    };
+  };
+  return piCommands;
+}
+
+function newGateway(options: ConstructorParameters<typeof Gateway>[0]): Gateway {
+  const gateway = new Gateway(options);
+  fakePi(gateway);
+  return gateway;
+}
 
 function mockApi(): TelegramApi {
   return {
@@ -83,7 +116,7 @@ function mockVoiceContext(overrides: Partial<VoiceMessageContext> = {}): VoiceMe
 describe("Gateway.handleTextMessage", () => {
   it("rejects unauthorized user", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 999, api });
+    const gateway = newGateway({ allowedUserId: 999, api });
     const ctx = mockContext();
     let replied = false;
     ctx.reply = async () => { replied = true; };
@@ -96,7 +129,7 @@ describe("Gateway.handleTextMessage", () => {
 
   it("starts a session for authorized user when pi is idle", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     const ctx = mockContext();
 
     await gateway.handleTextMessage(ctx, api);
@@ -106,10 +139,9 @@ describe("Gateway.handleTextMessage", () => {
 
   it("steers message and reacts when pi is busy", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true; // simulate busy
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
 
     const ctx = mockContext({ msg: { text: "second msg" } });
     const reactions: string[] = [];
@@ -119,7 +151,6 @@ describe("Gateway.handleTextMessage", () => {
 
     expect(piCommands).toEqual([{
       type: "steer",
-      id: expect.any(String),
       message: "second msg",
     }]);
     expect(reactions).toEqual(["👀"]);
@@ -127,7 +158,7 @@ describe("Gateway.handleTextMessage", () => {
 
   it("passes unknown slash commands to Pi as prompts", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     const ctx = mockContext({ msg: { text: "/skill:test" } });
 
     await gateway.handleTextMessage(ctx, api);
@@ -138,9 +169,8 @@ describe("Gateway.handleTextMessage", () => {
 
 describe("Gateway.steerPi", () => {
   function steerGateway() {
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    const piCommands = fakePi(gateway);
     return { gateway, piCommands };
   }
 
@@ -151,7 +181,6 @@ describe("Gateway.steerPi", () => {
 
     expect(piCommands).toEqual([{
       type: "steer",
-      id: expect.any(String),
       message: "steered text",
     }]);
   });
@@ -165,37 +194,28 @@ describe("Gateway.steerPi", () => {
 
     expect(piCommands[0]).toEqual({
       type: "steer",
-      id: expect.any(String),
       message: "look",
       images: [{ type: "image", data: "aa==", mimeType: "image/png" }],
     });
   });
 
   it("takes no further action on disposition=queued", async () => {
-    const { gateway, piCommands } = steerGateway();
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    const piCommands = fakePi(gateway, (cmd) => cmd.type === "steer" ? { data: { disposition: "queued" } } : undefined);
     gateway.piStreaming = true;
-    gateway.steerPi(123, "steered text");
-    const id = (piCommands[0] as { id?: string }).id;
 
-    await gateway.handlePiEvent({
-      type: "response", command: "steer", id, success: true,
-      data: { disposition: "queued" },
-    });
+    await gateway.steerPi(123, "steered text");
 
     expect(piCommands.length).toBe(1);
     expect(gateway.piStreaming).toBe(true); // run continues, pi delivers the steer
   });
 
   it("falls back to a fresh prompt run on disposition=handled", async () => {
-    const { gateway, piCommands } = steerGateway();
-    gateway.steerPi(123, "steered text");
-    const id = (piCommands[0] as { id?: string }).id;
-
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
     // Input handler consumed the steer without starting work
-    await gateway.handlePiEvent({
-      type: "response", command: "steer", id, success: true,
-      data: { disposition: "handled" },
-    });
+    const piCommands = fakePi(gateway, (cmd) => cmd.type === "steer" ? { data: { disposition: "handled" } } : undefined);
+
+    await gateway.steerPi(123, "steered text");
 
     expect(piCommands.length).toBe(2);
     expect(piCommands[1]).toEqual({ type: "prompt", message: "steered text" });
@@ -203,18 +223,69 @@ describe("Gateway.steerPi", () => {
   });
 
   it("falls back to a fresh prompt run on failed steer response", async () => {
-    const { gateway, piCommands } = steerGateway();
-    gateway.piStreaming = true;
-    gateway.steerPi(123, "steered text");
-    const id = (piCommands[0] as { id?: string }).id;
-
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
     // e.g. message raced with agent_settled and pi already settled
-    await gateway.handlePiEvent({
-      type: "response", command: "steer", id, success: false, error: "not streaming",
-    });
+    const piCommands = fakePi(gateway, (cmd) => cmd.type === "steer" ? { success: false, error: "not streaming" } : undefined);
+    gateway.piStreaming = true;
+
+    await gateway.steerPi(123, "steered text");
 
     expect(piCommands.length).toBe(2);
     expect(piCommands[1]).toEqual({ type: "prompt", message: "steered text" });
+  });
+});
+
+describe("Gateway.startPiSession prompt disposition", () => {
+  it("stays streaming when pi starts a run", async () => {
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    fakePi(gateway, () => ({ data: { disposition: "started" } }));
+
+    await gateway.startPiSession(123, "hello");
+
+    expect(gateway.piStreaming).toBe(true);
+    expect(gateway.currentChatId).toBe(123);
+  });
+
+  it("goes idle when an extension command handled the prompt (no agent_settled follows)", async () => {
+    const sent: string[] = [];
+    const gateway = newGateway({
+      allowedUserId: 1,
+      api: { ...mockApi(), sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; } },
+    });
+    fakePi(gateway, () => ({ data: { disposition: "handled" } }));
+
+    await gateway.startPiSession(123, "/undo");
+
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.currentChatId).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it("goes idle and reports the error when pi rejects the prompt", async () => {
+    const sent: string[] = [];
+    const gateway = newGateway({
+      allowedUserId: 1,
+      api: { ...mockApi(), sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; } },
+    });
+    fakePi(gateway, () => ({ success: false, error: "No API key" }));
+
+    await gateway.startPiSession(123, "hello");
+
+    expect(gateway.piStreaming).toBe(false);
+    expect(sent).toEqual(["❌ No API key"]);
+  });
+
+  it("reports 'pi not connected' when there is no pi client", async () => {
+    const sent: string[] = [];
+    const gateway = new Gateway({
+      allowedUserId: 1,
+      api: { ...mockApi(), sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; } },
+    });
+
+    await gateway.startPiSession(123, "hello");
+
+    expect(gateway.piStreaming).toBe(false);
+    expect(sent).toEqual(["❌ pi not connected"]);
   });
 });
 
@@ -225,7 +296,7 @@ describe("Gateway.sendTyping", () => {
       ...mockApi(),
       sendChatAction: async (chatId, action) => { actions.push([chatId, action]); },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.sendTyping(123);
 
     expect(actions).toEqual([[123, "typing"]]);
@@ -237,7 +308,7 @@ describe("Gateway.sendTyping", () => {
       ...mockApi(),
       sendChatAction: async () => { count++; },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.sendTyping(123);
     gateway.sendTyping(123);
     gateway.sendTyping(123);
@@ -251,7 +322,7 @@ describe("Gateway.sendTyping", () => {
       ...mockApi(),
       sendChatAction: async (_c, a) => { actions.push(a); },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.sendTyping(123);
     expect(actions).toEqual(["typing"]);
 
@@ -265,7 +336,7 @@ describe("Gateway.handlePiEvent", () => {
   it("streams text_delta through relay", async () => {
     const api = mockApi();
     const edits: string[] = [];
-    const gateway = new Gateway({
+    const gateway = newGateway({
       allowedUserId: 1,
       api: {
         sendMessage: async () => ({ message_id: 1 }),
@@ -293,7 +364,7 @@ describe("Gateway.handlePiEvent", () => {
 
   it("keeps piStreaming true across agent_end; agent_settled resets idle state", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
 
     // Start a session
     await gateway.startPiSession(123, "first");
@@ -318,7 +389,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0; // ignore placeholder message
 
@@ -341,7 +412,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -352,89 +423,13 @@ describe("Gateway.handlePiEvent", () => {
     expect(sent.length).toBe(0);
   });
 
-  it("renders thinking levels list with inline keyboard", async () => {
-    const sent: Array<{ chatId: number | string; text: string; reply_markup?: unknown }> = [];
-    const api: TelegramApi = {
-      sendMessage: async (chatId, text, opts) => {
-        sent.push({ chatId, text, reply_markup: (opts as { reply_markup?: unknown })?.reply_markup });
-        return { message_id: 100 };
-      },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-
-    await gateway.handlePiEvent({
-      type: "response",
-      command: "get_available_thinking_levels",
-      success: true,
-      data: { levels: ["off", "low", "high"] },
-    });
-
-    expect(sent.length).toBe(1);
-    expect(sent[0]!.chatId).toBe(123);
-    expect(sent[0]!.text).toContain("💭 Available thinking levels (3)");
-    expect(sent[0]!.text).toContain("off\nlow\nhigh");
-    const kb = (sent[0]!.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }).inline_keyboard;
-    expect(kb[0]!.map(b => b.callback_data)).toEqual(["think:off", "think:low", "think:high"]);
-  });
-
-  it("renders friendly message when no thinking levels available", async () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-
-    await gateway.handlePiEvent({
-      type: "response",
-      command: "get_available_thinking_levels",
-      success: true,
-      data: { levels: [] },
-    });
-
-    expect(sent).toEqual(["❌ No thinking levels available."]);
-  });
-
-  it("confirms set_thinking_level with the wired level and clears pending state", async () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-    gateway.pendingThinkLevel.set(123, "high");
-
-    await gateway.handlePiEvent({ type: "response", command: "set_thinking_level", success: true });
-    expect(sent).toEqual(["\uD83D\uDCAD Thinking level: high"]);
-    expect(gateway.pendingThinkLevel.has(123)).toBe(false);
-  });
-
-  it("clears pending think level on set_thinking_level error", async () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-    gateway.pendingThinkLevel.set(123, "bogus");
-
-    await gateway.handlePiEvent({ type: "response", command: "set_thinking_level", success: false, error: "invalid level" });
-    expect(sent).toEqual([]);
-    expect(gateway.pendingThinkLevel.has(123)).toBe(false);
-  });
-
   it("accumulates tool counts across multiple turns", async () => {
     const sent: string[] = [];
     const api: TelegramApi = {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 100 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -455,7 +450,7 @@ describe("Gateway.handlePiEvent", () => {
   });
 
   it("clears tool counts after agent_end sends summary", async () => {
-    const gateway = new Gateway({
+    const gateway = newGateway({
       allowedUserId: 1,
       api: {
         sendMessage: async () => ({ message_id: 100 }),
@@ -472,7 +467,7 @@ describe("Gateway.handlePiEvent", () => {
 
   it("clears turnToolCounts on resetSession", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
@@ -488,7 +483,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -504,7 +499,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -523,7 +518,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -541,7 +536,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -556,7 +551,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -571,7 +566,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 200 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
     sent.length = 0;
 
@@ -589,7 +584,7 @@ describe("Gateway.handlePiEvent", () => {
         return {};
       },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
@@ -613,7 +608,7 @@ describe("Gateway.handlePiEvent", () => {
         return {};
       },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
@@ -639,7 +634,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     // no startPiSession — currentChatId stays 0
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
@@ -654,7 +649,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async () => ({ message_id: 1 }),
       editMessageText: async (_c, _m, text) => { edits.push(text); return {}; },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     await gateway.handlePiEvent({ type: "tool_execution_end", toolName: "bash", toolCallId: "nonexistent" });
@@ -664,7 +659,7 @@ describe("Gateway.handlePiEvent", () => {
 
   it("resetSession clears toolMessages", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     await gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1" });
@@ -676,7 +671,7 @@ describe("Gateway.handlePiEvent", () => {
 
   it("tool_execution_start still counts when currentChatId is 0", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     // no startPiSession → currentChatId = 0, no message sent
 
     gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
@@ -692,7 +687,7 @@ describe("Gateway.handlePiEvent", () => {
         return {};
       },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     gateway.handlePiEvent({ type: "agent_start" });
@@ -722,7 +717,7 @@ describe("Gateway.handlePiEvent", () => {
       sendMessage: async (chatId, text) => { sent.push({ chatId, text }); return { message_id: 77 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     // model rejects before any assistant message_start — no placeholder created
@@ -750,7 +745,7 @@ describe("Gateway.handlePiEvent", () => {
       editMessageText: async () => ({}),
       sendChatAction: async (chatId) => { typingCalls.push(chatId as number); },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "test");
 
     gateway.handlePiEvent({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "a" } });
@@ -769,7 +764,7 @@ describe("Gateway.handlePiEvent", () => {
       ...mockApi(),
       sendChatAction: async (_c, a) => { actions.push(a); },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.currentChatId = 123;
 
     gateway.handlePiEvent({ type: "response", command: "get_state", success: true, data: {} });
@@ -783,7 +778,7 @@ describe("Gateway.handlePiEvent", () => {
       ...mockApi(),
       sendChatAction: async (_c, a) => { actions.push(a); },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.currentChatId = 123;
 
     await gateway.handlePiEvent({ type: "agent_end" });
@@ -797,7 +792,7 @@ describe("Gateway.handlePiEvent", () => {
       ...mockApi(),
       sendChatAction: async (_c, a) => { actions.push(a); },
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.currentChatId = 0;
 
     gateway.handlePiEvent({ type: "message_start" });
@@ -807,128 +802,11 @@ describe("Gateway.handlePiEvent", () => {
 
   it("counts tools in turnToolCounts", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     gateway.handlePiEvent({ type: "tool_execution_start", toolName: "bash" });
 
     expect(gateway.turnToolCounts.get("bash")).toBe(1);
-  });
-
-  it("stores currentSessionId from get_state response", async () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-    expect(gateway.currentSessionId).toBe(null);
-
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: { sessionId: "sid-1", sessionFile: "sid-1.jsonl", model: { provider: "p", id: "m" } },
-    });
-
-    expect(gateway.currentSessionId).toBe("sid-1");
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toContain("sid-1");
-  });
-
-  it("leaves currentSessionId null when get_state has no sessionId", async () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-    gateway.currentSessionId = "old";
-
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: {},
-    });
-
-    expect(gateway.currentSessionId).toBe("old");
-  });
-
-  it("get_state response does NOT trigger file deletion", async () => {
-    let deleted = false;
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    gateway.deleteFile = async () => { deleted = true; };
-    gateway.lastChatId = 123;
-    gateway.currentSessionId = "sid-1";
-    gateway.sessionPicker.set("sid-1", { path: "/fake/sid-1.jsonl", id: "sid-1", created: "2026-05-15T00:00:00.000Z", mtime: 1 });
-
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: { sessionId: "sid-2" },
-    });
-
-    expect(deleted).toBe(false);
-    expect(gateway.currentSessionId).toBe("sid-2");
-  });
-
-  it("preserves currentSessionId through delete flow: stored → reset clears → get_state restores", async () => {
-    const sent: string[] = [];
-    const api: TelegramApi = {
-      ...mockApi(),
-      sendMessage: async (_c, text) => { sent.push(text); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-
-    // Simulate normal operation: a previous get_state stored the session ID
-    gateway.currentSessionId = "old-sid";
-    gateway.sessionPicker.set("old-sid", { path: "/tmp/old.jsonl", id: "old-sid", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
-
-    // Simulate /delete: read stored ID, delete, reset, then new_session + get_state
-    const sessionId = gateway.currentSessionId;
-    expect(sessionId).toBe("old-sid");
-
-    gateway.resetSession("/delete");
-    expect(gateway.currentSessionId).toBeNull();
-
-    // Simulate get_state response for the new session
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: { sessionId: "new-sid", model: { provider: "p", id: "m" } },
-    });
-
-    expect(gateway.currentSessionId).toBe("new-sid");
-    expect(sent.length).toBe(1);
-    expect(sent[0]).toContain("new-sid");
-  });
-
-  it("stores currentSessionId on /new flow: resetSession → get_state", async () => {
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    gateway.lastChatId = 123;
-    expect(gateway.currentSessionId).toBeNull();
-
-    gateway.resetSession("/new");
-    expect(gateway.currentSessionId).toBeNull();
-
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: { sessionId: "new-sid", model: { provider: "p", id: "m" } },
-    });
-
-    expect(gateway.currentSessionId).toBe("new-sid");
-  });
-
-  it("stores currentSessionId on /resume flow: switchToSession (resetSession) → get_state", async () => {
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
-    gateway.sendPi = () => {};
-    gateway.lastChatId = 123;
-    gateway.currentSessionId = "old-sid";
-    gateway.sessionPicker.set("target", { path: "/tmp/t.jsonl", id: "target", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
-
-    gateway.switchToSession("target");
-    expect(gateway.currentSessionId).toBeNull();
-
-    await gateway.handlePiEvent({
-      type: "response", command: "get_state", success: true,
-      data: { sessionId: "new-sid" },
-    });
-
-    expect(gateway.currentSessionId).toBe("new-sid");
   });
 });
 
@@ -942,7 +820,7 @@ describe("Integration: replay recorded fixture", () => {
       editMessageText: async (_c, _m, text) => { edits.push(text); },
     };
 
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     await gateway.startPiSession(123, "Hello robot!", api);
 
     for (const line of lines) {
@@ -982,7 +860,7 @@ describe("Integration: replay recorded fixture", () => {
 describe("Gateway.resetSession", () => {
   it("clears relay and streaming state", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     await gateway.startPiSession(123, "active");
     expect(gateway.currentRelay).toBeNull();
@@ -994,7 +872,7 @@ describe("Gateway.resetSession", () => {
   });
 
   it("clears currentSessionId", () => {
-    const gateway = new Gateway({ allowedUserId: 1, api: mockApi() });
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
     gateway.currentSessionId = "sid-42";
     gateway.resetSession("test");
     expect(gateway.currentSessionId).toBeNull();
@@ -1011,7 +889,7 @@ describe("Gateway.showStatus", () => {
       },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       model: { provider: "opencode-go", modelId: "minimax-m2.5" },
@@ -1041,7 +919,7 @@ describe("Gateway.showStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showStatus(1, {
       model: { provider: "x", modelId: "y" },
@@ -1062,7 +940,7 @@ describe("Gateway.showCompact", () => {
       sendMessage: async (_c, text, other) => { messages.push({ text, other }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showCompact(456, { tokensBefore: 150000 });
 
@@ -1079,7 +957,7 @@ describe("Gateway.showCompact", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showCompact(1, { tokensBefore: 2_500_000 });
 
@@ -1092,7 +970,7 @@ describe("Gateway.showCompact", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showCompact(1, { tokensBefore: 150_000, estimatedTokensAfter: 32_000 });
 
@@ -1106,7 +984,7 @@ describe("Gateway.showCompact", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showCompact(1, { estimatedTokensAfter: 1_200_000 });
 
@@ -1119,7 +997,7 @@ describe("Gateway.showCompact", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showCompact(1, {});
 
@@ -1132,7 +1010,7 @@ describe("Gateway.showCompact", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showCompact(1, undefined);
 
@@ -1150,7 +1028,7 @@ describe("Gateway.showStats", () => {
       },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       sessionId: "abc123",
@@ -1187,7 +1065,7 @@ describe("Gateway.showStats", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showStats(1, {
       sessionId: "x",
@@ -1217,7 +1095,7 @@ describe("Gateway.showDaemonStatus", () => {
       },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showDaemonStatus(456);
 
@@ -1240,8 +1118,8 @@ describe("Gateway.showDaemonStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.piClient = { pid: 12345, send: () => {}, close: () => {} };
+    const gateway = newGateway({ allowedUserId: 1, api });
+    gateway.piClient = { pid: 12345, request: async () => ({ type: "response", success: true }), close: () => {} };
 
     await gateway.showDaemonStatus(1);
 
@@ -1255,7 +1133,7 @@ describe("Gateway.showDaemonStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.piStreaming = true;
 
     await gateway.showDaemonStatus(1);
@@ -1270,7 +1148,7 @@ describe("Gateway.showDaemonStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showDaemonStatus(1);
 
@@ -1284,7 +1162,7 @@ describe("Gateway.showDaemonStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.currentSessionId = "01999999-aaaa-bbbb-cccc-ddddeeeeffff";
 
     await gateway.showDaemonStatus(1);
@@ -1300,7 +1178,7 @@ describe("Gateway.showDaemonStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showDaemonStatus(1);
 
@@ -1314,7 +1192,7 @@ describe("Gateway.showDaemonStatus", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     gateway.sessionPicker.set("a", { path: "/a.jsonl", id: "a", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
     gateway.sessionPicker.set("b", { path: "/b.jsonl", id: "b", created: "2026-01-01T00:00:00.000Z", mtime: 2 });
     gateway.sessionPicker.set("c", { path: "/c.jsonl", id: "c", created: "2026-01-01T00:00:00.000Z", mtime: 3 });
@@ -1338,7 +1216,7 @@ describe("Gateway.showLastMessage (/last)", () => {
       },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showLastMessage(456, {
       text: "Got it, just testing the waters.",
@@ -1356,7 +1234,7 @@ describe("Gateway.showLastMessage (/last)", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showLastMessage(1, { text: null });
 
@@ -1370,7 +1248,7 @@ describe("Gateway.showLastMessage (/last)", () => {
       sendMessage: async (_c, text) => { messages.push(text); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showLastMessage(1, undefined);
 
@@ -1383,7 +1261,7 @@ describe("Gateway.showLastMessage (/last)", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const longText = "x".repeat(4100);
     await gateway.showLastMessage(1, { text: longText });
@@ -1404,7 +1282,7 @@ describe("Gateway.showModels", () => {
       },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       models: [
@@ -1441,8 +1319,7 @@ describe("Gateway.showModels", () => {
       },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.modelFilter = "claUde"; // case-insensitive
+    const gateway = newGateway({ allowedUserId: 1, api }); // case-insensitive
 
     const data = {
       models: [
@@ -1451,7 +1328,7 @@ describe("Gateway.showModels", () => {
       ],
     };
 
-    await gateway.showModels(456, data);
+    await gateway.showModels(456, data, "claUde");
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.chatId).toBe(456);
@@ -1461,7 +1338,6 @@ describe("Gateway.showModels", () => {
     expect(ik.length).toBe(1);
     expect(ik[0][0].text).toBe("anthropic/claude-sonnet-4-20250514");
     expect(ik[0][0].callback_data).toBe("model:anthropic/claude-sonnet-4-20250514");
-    expect(gateway.modelFilter).toBeUndefined();
   });
 
   it("filters by model id as well as name", async () => {
@@ -1470,8 +1346,7 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, _t, other) => { messages.push(other); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.modelFilter = "minimax";
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       models: [
@@ -1480,7 +1355,7 @@ describe("Gateway.showModels", () => {
       ],
     };
 
-    await gateway.showModels(1, data);
+    await gateway.showModels(1, data, "minimax");
 
     const ik = (messages[0] as any)?.reply_markup?.inline_keyboard;
     expect(ik).toBeDefined();
@@ -1494,8 +1369,7 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, _t, other) => { messages.push(other); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.modelFilter = "opencode-go/minimax";
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       models: [
@@ -1505,7 +1379,7 @@ describe("Gateway.showModels", () => {
       ],
     };
 
-    await gateway.showModels(1, data);
+    await gateway.showModels(1, data, "opencode-go/minimax");
 
     const ik = (messages[0] as any)?.reply_markup?.inline_keyboard;
     expect(ik).toBeDefined();
@@ -1519,16 +1393,14 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.modelFilter = "nonexistent";
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = { models: [{ provider: "x", id: "y", name: "Test" }] };
 
-    await gateway.showModels(1, data);
+    await gateway.showModels(1, data, "nonexistent");
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.text).toBe('No models matching "nonexistent".');
-    expect(gateway.modelFilter).toBeUndefined();
   });
 
   it("shows empty message when no models available", async () => {
@@ -1537,7 +1409,7 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     await gateway.showModels(1, { models: [] });
 
@@ -1551,7 +1423,7 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       models: [
@@ -1572,7 +1444,7 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const data = {
       models: [{ provider: "x", id: "y" }],
@@ -1590,7 +1462,7 @@ describe("Gateway.showModels", () => {
       sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
       editMessageText: async () => ({}),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const longName = "A".repeat(100);
     const models: any[] = [];
@@ -1616,342 +1488,272 @@ describe("Gateway.showModels", () => {
   });
 });
 
-describe("Gateway.handlePiEvent command routing", () => {
-  it("routes get_state response to showStatus when lastChatId is set", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
+// Slash command handlers: each awaits requestPi() and replies to its chatId
+function sentTo(): { api: TelegramApi; messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] } {
+  const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
+  const api: TelegramApi = {
+    ...mockApi(),
+    sendMessage: async (chatId, text, other) => { messages.push({ chatId, text, other }); return { message_id: 1 }; },
+  };
+  return { api, messages };
+}
 
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"get_state","success":true,"data":{"model":{"provider":"p","modelId":"m"},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","sessionId":"sid","autoCompactionEnabled":true,"messageCount":1,"pendingMessageCount":0}}
-    `));
+// Fixture lines are recorded pi responses; replay one as requestPi's answer
+function fixtureResponse(name: string): Partial<PiResponse> {
+  return JSON.parse(loadFixtureLines(name)[0]!) as PiResponse;
+}
 
+describe("Gateway slash commands", () => {
+  it("cmdState stores currentSessionId and shows status to the given chat", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, () => ({ data: { sessionId: "sid-1", model: { provider: "p", id: "m" } } }));
+
+    await gateway.cmdState(789);
+
+    expect(piCommands).toEqual([{ type: "get_state" }]);
+    expect(gateway.currentSessionId).toBe("sid-1");
     expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("p/m");
-    expect(messages[0]!.text).toContain("sid");
+    expect(messages[0]!.chatId).toBe(789);
+    expect(messages[0]!.text).toContain("sid-1");
   });
 
-  it("routes get_session_stats response to showStats when lastChatId is set", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
+  it("cmdState keeps currentSessionId when get_state has no sessionId", async () => {
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    fakePi(gateway, () => ({ data: {} }));
+    gateway.currentSessionId = "old";
 
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"sid","userMessages":1,"assistantMessages":2,"toolCalls":0,"toolResults":0,"totalMessages":3,"tokens":{"input":100,"output":200,"cacheRead":0,"cacheWrite":0,"total":300},"cost":0.001}}
-    `));
+    await gateway.cmdState(1);
 
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("sid");
-    expect(messages[0]!.text).toContain("user: 1, assistant: 2");
-    expect(messages[0]!.text).toContain("$0.0010");
+    expect(gateway.currentSessionId).toBe("old");
   });
 
-  it("routes get_last_assistant_text response to showLastMessage when lastChatId is set", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
+  it("cmdState reports a failed get_state", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => ({ success: false, error: "boom" }));
 
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"get_last_assistant_text","success":true,"data":{"text":"the last reply"}}
-    `));
+    await gateway.cmdState(1);
 
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toBe("the last reply");
+    expect(messages.map((m) => m.text)).toEqual(["❌ Status failed: boom"]);
   });
 
-  it("does NOT route get_state response when lastChatId is 0", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 0;
+  it("replays get-state.jsonl through cmdState", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => fixtureResponse("get-state.jsonl"));
 
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"get_state","success":true,"data":{"model":{"provider":"p","modelId":"m"},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","sessionId":"sid","autoCompactionEnabled":true,"messageCount":1,"pendingMessageCount":0}}
-    `));
-
-    expect(called).toBe(false);
-  });
-
-  it("does NOT route other response commands to showStatus", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"new_session","success":true,"data":{"cancelled":false}}
-    `));
-
-    expect(called).toBe(false);
-  });
-
-  it("chains new_session response to get_state RPC when pi is connected", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.piClient = {
-      pid: 1,
-      send(cmd) { piCommands.push(cmd); },
-      close() {},
-    };
-
-    await gateway.handlePiEvent({
-      type: "response", command: "new_session", success: true,
-    });
-
-    expect(piCommands.length).toBe(1);
-    expect(piCommands[0]).toEqual({ type: "get_state" });
-    expect(called).toBe(false);
-  });
-
-  it("chains switch_session response to get_state RPC when pi is connected", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.piClient = {
-      pid: 1,
-      send(cmd) { piCommands.push(cmd); },
-      close() {},
-    };
-
-    await gateway.handlePiEvent({
-      type: "response", command: "switch_session", success: true,
-    });
-
-    expect(piCommands.length).toBe(1);
-    expect(piCommands[0]).toEqual({ type: "get_state" });
-    expect(called).toBe(false);
-  });
-
-  it("routes get_available_models response to showModels when lastChatId is set", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"x","id":"y","name":"Test","contextWindow":100000,"input":["text"],"cost":{"input":1,"output":2}}]}}
-    `));
-
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("x/y");
-    expect(messages[0]!.text).toContain("Test");
-  });
-
-  it("does NOT route get_available_models response when lastChatId is 0", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 0;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"get_available_models","success":true,"data":{"models":[]}}
-    `));
-
-    expect(called).toBe(false);
-  });
-
-  it("routes bash response via lastChatId, sending output as <pre> chunks", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"bash","success":true,"data":{"output":"hello from bash","exitCode":0}}
-    `));
-
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("hello from bash");
-    expect(messages[0]!.text).toContain("Exit code: 0");
-  });
-
-  it("does NOT route bash response when lastChatId is 0", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 0;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"bash","success":true,"data":{"output":"hi","exitCode":0}}
-    `));
-
-    expect(called).toBe(false);
-  });
-
-  it("routes compact response to showCompact when lastChatId is set", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"compact","success":true,"data":{"tokensBefore":120000}}
-    `));
-
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("🗜️ Compacted");
-    expect(messages[0]!.text).toContain("120.0K tokens");
-  });
-
-  it("does NOT route compact response when lastChatId is 0", async () => {
-    let called = false;
-    const api: TelegramApi = {
-      sendMessage: async () => { called = true; return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 0;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"compact","success":true,"data":{"tokensBefore":5000}}
-    `));
-
-    expect(called).toBe(false);
-  });
-
-  it("sends error message on failed compact response", async () => {
-    const messages: { text: string }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text) => { messages.push({ text }); return { message_id: 1 }; },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 789;
-
-    gateway.handlePiEvent(JSON.parse(`
-      {"type":"response","command":"compact","success":false,"error":"Already compacted"}
-    `));
-
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.text).toBe("❌ Compaction failed: Already compacted");
-  });
-});
-
-describe("Integration: replay command responses", () => {
-  it("replays get-state.jsonl and produces status message", async () => {
-    const messages: { text: string; other?: Record<string, unknown> }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text, other) => {
-        messages.push({ text, other });
-        return { message_id: 1 };
-      },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
-
-    const lines = loadFixtureLines("get-state.jsonl");
-    for (const line of lines) {
-      gateway.handlePiEvent(JSON.parse(line));
-    }
+    await gateway.cmdState(123);
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
     expect(messages[0]!.text).toContain("opencode-go/minimax-m2.5");
     expect(messages[0]!.text).toContain("019e23a4-4c58-71a1-b3b9-6da3b6c97a28");
     expect(messages[0]!.text).toContain("medium");
-    expect(messages[0]!.text).toContain("0");
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("</pre>");
   });
 
-  it("replays get-session-stats.jsonl and produces context message", async () => {
-    const messages: { text: string; other?: Record<string, unknown> }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text, other) => {
-        messages.push({ text, other });
-        return { message_id: 1 };
-      },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
+  it("cmdSession shows status then stats (replayed fixtures)", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, (cmd) =>
+      fixtureResponse(cmd.type === "get_state" ? "get-state.jsonl" : "get-session-stats.jsonl"));
 
-    const lines = loadFixtureLines("get-session-stats.jsonl");
-    for (const line of lines) {
-      gateway.handlePiEvent(JSON.parse(line));
-    }
+    await gateway.cmdSession(123);
 
-    expect(messages.length).toBe(1);
-    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
-    expect(messages[0]!.text).toContain("019e23a4-4c58-71a1-b3b9-6da3b6c97a28");
-    expect(messages[0]!.text).toContain("0");
-    expect(messages[0]!.text).toContain("$0.0000");
-    expect(messages[0]!.text).toContain("📁 Session file:");
-    expect(messages[0]!.text).toContain("<pre>");
-    expect(messages[0]!.text).toContain("</pre>");
+    expect(piCommands.map((c) => c.type).sort()).toEqual(["get_session_stats", "get_state"]);
+    expect(messages.length).toBe(2);
+    expect(messages[0]!.text).toContain("🤖 Model:");
+    expect(messages[1]!.text).toContain("$0.0000");
+    expect(messages[1]!.text).toContain("📁 Session file:");
   });
 
-  it("replays get-last-assistant-text.jsonl and produces last message", async () => {
-    const messages: { text: string; other?: Record<string, unknown> }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (_c, text, other) => {
-        messages.push({ text, other });
-        return { message_id: 1 };
-      },
-      editMessageText: async () => ({}),
-    };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.lastChatId = 123;
+  it("cmdLast replays get-last-assistant-text.jsonl", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => fixtureResponse("get-last-assistant-text.jsonl"));
 
-    const lines = loadFixtureLines("get-last-assistant-text.jsonl");
-    for (const line of lines) {
-      gateway.handlePiEvent(JSON.parse(line));
-    }
+    await gateway.cmdLast(123);
 
     expect(messages.length).toBe(1);
     expect(messages[0]!.other).toEqual({ parse_mode: "MarkdownV2" });
     expect(messages[0]!.text).toContain("Got it, just testing the waters\\.");
-    expect(messages[0]!.text).toContain("Ready when you need me for anything kklaw\\-related\\!");
+  });
+
+  it("cmdNew resets, sends new_session, confirms, then shows status", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, (cmd) => cmd.type === "get_state" ? { data: { sessionId: "new-sid" } } : undefined);
+    gateway.currentSessionId = "old-sid";
+    gateway.piStreaming = true;
+
+    await gateway.cmdNew(5);
+
+    expect(piCommands).toEqual([{ type: "new_session" }, { type: "get_state" }]);
+    expect(gateway.piStreaming).toBe(false);
+    expect(gateway.currentSessionId).toBe("new-sid");
+    expect(messages[0]!.text).toBe("🆕 New session. Ready to roll 🫡");
+    expect(messages[1]!.text).toContain("new-sid");
+  });
+
+  it("cmdNew reports a failed new_session and skips get_state", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, () => ({ success: false, error: "nope" }));
+
+    await gateway.cmdNew(5);
+
+    expect(piCommands).toEqual([{ type: "new_session" }]);
+    expect(messages.map((m) => m.text)).toEqual(["❌ New session failed: nope"]);
+  });
+
+  it("cmdDelete unlinks the current session file, then starts a new session", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, (cmd) => cmd.type === "get_state" ? { data: { sessionId: "new-sid" } } : undefined);
+    const deleted: string[] = [];
+    gateway.deleteFile = async (path) => { deleted.push(path); };
+    gateway.currentSessionId = "old-sid";
+    gateway.sessionPicker.set("old-sid", { path: "/tmp/old.jsonl", id: "old-sid", created: "2026-01-01T00:00:00.000Z", mtime: 1 });
+
+    await gateway.cmdDelete(5);
+
+    expect(deleted).toEqual(["/tmp/old.jsonl"]);
+    expect(piCommands).toEqual([{ type: "new_session" }, { type: "get_state" }]);
+    expect(gateway.currentSessionId).toBe("new-sid");
+    expect(messages[0]!.text).toBe("🗑️ Session deleted. New session: standing by 🫡");
+  });
+
+  it("cmdName confirms only after pi accepts", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway);
+    await gateway.cmdName(5, "evil plan");
+    expect(piCommands).toEqual([{ type: "set_session_name", name: "evil plan" }]);
+
+    fakePi(gateway, () => ({ success: false, error: "Session name cannot be empty" }));
+    await gateway.cmdName(5, " ");
+
+    expect(messages.map((m) => m.text)).toEqual(["✏️ Named.", "❌ Naming failed: Session name cannot be empty"]);
+  });
+
+  it("cmdModels passes the filter to showModels", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => ({
+      data: { models: [{ provider: "opencode-go", id: "minimax-m2.5", name: "MiniMax M2.5" }, { provider: "x", id: "y", name: "Y" }] },
+    }));
+
+    await gateway.cmdModels(5, "minimax");
+
+    expect(messages.length).toBe(1);
+    const ik = (messages[0]!.other as any)?.reply_markup?.inline_keyboard;
+    expect(ik.length).toBe(1);
+    expect(ik[0][0].callback_data).toBe("model:opencode-go/minimax-m2.5");
+  });
+
+  it("setModel returns the picker text for success and failure", async () => {
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    const piCommands = fakePi(gateway);
+    expect(await gateway.setModel("p", "m")).toBe("✅ Model: p/m");
+    expect(piCommands).toEqual([{ type: "set_model", provider: "p", modelId: "m" }]);
+
+    fakePi(gateway, () => ({ success: false, error: "Model not found: p/m" }));
+    expect(await gateway.setModel("p", "m")).toBe("❌ Model switch failed: Model not found: p/m");
+  });
+
+  it("cmdThinkingLevels renders the list with an inline keyboard", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => ({ data: { levels: ["off", "low", "high"] } }));
+
+    await gateway.cmdThinkingLevels(123);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(123);
+    expect(messages[0]!.text).toContain("💭 Available thinking levels (3)");
+    expect(messages[0]!.text).toContain("off\nlow\nhigh");
+    const kb = (messages[0]!.other as { reply_markup: { inline_keyboard: Array<Array<{ callback_data: string }>> } }).reply_markup.inline_keyboard;
+    expect(kb[0]!.map((b) => b.callback_data)).toEqual(["think:off", "think:low", "think:high"]);
+  });
+
+  it("cmdThinkingLevels shows a friendly message when none are available", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => ({ data: { levels: [] } }));
+
+    await gateway.cmdThinkingLevels(123);
+
+    expect(messages.map((m) => m.text)).toEqual(["❌ No thinking levels available."]);
+  });
+
+  it("cmdSetThinkingLevel acks with the requested level, or the error", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway);
+    await gateway.cmdSetThinkingLevel(123, "high");
+    expect(piCommands).toEqual([{ type: "set_thinking_level", level: "high" }]);
+
+    fakePi(gateway, () => ({ success: false, error: "invalid level" }));
+    await gateway.cmdSetThinkingLevel(123, "bogus");
+
+    expect(messages.map((m) => m.text)).toEqual(["💭 Thinking level: high", "❌ Thinking level failed: invalid level"]);
+  });
+
+  it("cmdCompact sends customInstructions and shows the result", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, () => ({ data: { tokensBefore: 12000, estimatedTokensAfter: 3000 } }));
+
+    await gateway.cmdCompact(5, "keep the plan");
+
+    expect(piCommands).toEqual([{ type: "compact", customInstructions: "keep the plan" }]);
+    expect(messages[0]!.text).toContain("🗜️ Compacted");
+    expect(messages[0]!.text).toContain("12.0K");
+  });
+
+  it("cmdCompact reports failure", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, () => ({ success: false, error: "Already compacted" }));
+
+    await gateway.cmdCompact(5);
+
+    expect(piCommands).toEqual([{ type: "compact" }]);
+    expect(messages.map((m) => m.text)).toEqual(["❌ Compaction failed: Already compacted"]);
+  });
+
+  it("cmdAbortBash sends abort_bash and confirms", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway);
+
+    await gateway.cmdAbortBash(5);
+
+    expect(piCommands).toEqual([{ type: "abort_bash" }]);
+    expect(messages.map((m) => m.text)).toEqual(["🛑 Bash aborted."]);
+  });
+
+  it("runBash sends output as <pre> chunks to the given chat", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => ({ data: { output: "hi <b>\n", exitCode: 0 } }));
+
+    await gateway.runBash(789, "echo hi", false);
+
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(789);
+    expect(messages[0]!.text).toBe("<pre>Exit code: 0\n\nhi &lt;b&gt;\n</pre>");
+    expect(messages[0]!.other).toEqual({ parse_mode: "HTML" });
+  });
+
+  it("runBash reports a failed bash command", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    fakePi(gateway, () => ({ success: false, error: "pi exited (code=1)" }));
+
+    await gateway.runBash(789, "echo hi", true);
+
+    expect(messages.map((m) => m.text)).toEqual(["❌ Bash failed: pi exited (code=1)"]);
   });
 });
 
@@ -2011,7 +1813,7 @@ function setupSessionFixtures(): string {
 describe("Gateway.scanRecentSessions", () => {
   it("sorts sessions by mtime (newest first) and extracts names", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     const sessionsDir = setupSessionFixtures();
 
     const sessions = gateway.scanRecentSessions(10, sessionsDir);
@@ -2027,7 +1829,7 @@ describe("Gateway.scanRecentSessions", () => {
 
   it("filters out files without a valid session header", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     const sessionsDir = setupSessionFixtures();
 
     const sessions = gateway.scanRecentSessions(10, sessionsDir);
@@ -2038,7 +1840,7 @@ describe("Gateway.scanRecentSessions", () => {
 
   it("recurses into subdirectories", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     const sessionsDir = setupSessionFixtures();
 
     const sessions = gateway.scanRecentSessions(10, sessionsDir);
@@ -2050,7 +1852,7 @@ describe("Gateway.scanRecentSessions", () => {
 
   it("populates sessionPicker map", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     const sessionsDir = setupSessionFixtures();
 
     gateway.scanRecentSessions(10, sessionsDir);
@@ -2064,7 +1866,7 @@ describe("Gateway.scanRecentSessions", () => {
 
   it("handles empty directory", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
     const emptyDir = mkdtempSync(join(tmpdir(), "kklaw-test-empty-"));
 
     const sessions = gateway.scanRecentSessions(10, emptyDir);
@@ -2075,7 +1877,7 @@ describe("Gateway.scanRecentSessions", () => {
 
   it("handles nonexistent directory", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+    const gateway = newGateway({ allowedUserId: 1, api });
 
     const sessions = gateway.scanRecentSessions(10, "/nonexistent/path/xyz");
 
@@ -2089,43 +1891,42 @@ describe("Gateway.scanRecentSessions", () => {
 // ============================================================
 
 describe("Gateway.switchToSession", () => {
-  it("sends switch_session RPC when session is in picker", () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+  it("sends switch_session, then shows the new session status", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, (cmd) => cmd.type === "get_state" ? { data: { sessionId: "01999999-2222-7aaa-bbbb-ccccddddffff" } } : undefined);
     const sessionsDir = setupSessionFixtures();
-
-    const piCommands: Record<string, unknown>[] = [];
-    const mockPi: PiClient = {
-      pid: 1,
-      send(cmd) { piCommands.push(cmd); },
-      close() {},
-    };
-    gateway.piClient = mockPi;
-
     gateway.scanRecentSessions(10, sessionsDir);
-    const sessionId = "01999999-2222-7aaa-bbbb-ccccddddffff";
+    gateway.currentSessionId = "old-sid";
 
-    gateway.switchToSession(sessionId);
+    await gateway.switchToSession(789, "01999999-2222-7aaa-bbbb-ccccddddffff");
 
-    expect(piCommands.length).toBe(1);
-    expect(piCommands[0]).toEqual({
-      type: "switch_session",
-      sessionPath: expect.stringContaining("01999999-2222-7aaa-bbbb-ccccddddffff.jsonl"),
-    });
+    expect(piCommands).toEqual([
+      { type: "switch_session", sessionPath: expect.stringContaining("01999999-2222-7aaa-bbbb-ccccddddffff.jsonl") },
+      { type: "get_state" },
+    ]);
+    expect(gateway.currentSessionId).toBe("01999999-2222-7aaa-bbbb-ccccddddffff");
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.chatId).toBe(789);
   });
 
-  it("does nothing when session is not in picker", () => {
-    const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 1, api });
+  it("reports a failed switch_session and skips get_state", async () => {
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, () => ({ success: false, error: "file gone" }));
+    gateway.scanRecentSessions(10, setupSessionFixtures());
 
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.piClient = {
-      pid: 1,
-      send(cmd) { piCommands.push(cmd); },
-      close() {},
-    };
+    await gateway.switchToSession(789, "01999999-2222-7aaa-bbbb-ccccddddffff");
 
-    gateway.switchToSession("nonexistent-id");
+    expect(piCommands.length).toBe(1);
+    expect(messages.map((m) => m.text)).toEqual(["❌ Switch failed: file gone"]);
+  });
+
+  it("does nothing when session is not in picker", async () => {
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    const piCommands = fakePi(gateway);
+
+    await gateway.switchToSession(789, "nonexistent-id");
 
     expect(piCommands.length).toBe(0);
   });
@@ -2137,44 +1938,17 @@ describe("Gateway.switchToSession", () => {
 
 describe("Integration: /resume then /last", () => {
   it("switches session and then /last returns correct text", async () => {
-    const messages: { chatId: number | string; text: string; other?: Record<string, unknown> }[] = [];
-    const api: TelegramApi = {
-      sendMessage: async (chatId, text, other) => {
-        messages.push({ chatId, text, other });
-        return { message_id: 1 };
-      },
-      editMessageText: async () => ({}),
-    };
+    const { api, messages } = sentTo();
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway, (cmd) =>
+      cmd.type === "get_last_assistant_text" ? { data: { text: "The auth bug is fixed." } } : undefined);
+    gateway.scanRecentSessions(10, setupSessionFixtures());
 
-    const piCommands: Record<string, unknown>[] = [];
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.piClient = {
-      pid: 1,
-      send(cmd) { piCommands.push(cmd); },
-      close() {},
-    };
+    await gateway.switchToSession(789, "01999999-1111-7aaa-bbbb-ccccddddeeee");
+    messages.length = 0; // drop the status message
+    await gateway.cmdLast(789);
 
-    const sessionsDir = setupSessionFixtures();
-    gateway.scanRecentSessions(10, sessionsDir);
-
-    // Switch to the first session
-    const sessionId = "01999999-1111-7aaa-bbbb-ccccddddeeee";
-    gateway.switchToSession(sessionId);
-
-    expect(piCommands).toEqual([{
-      type: "switch_session",
-      sessionPath: expect.stringContaining("01999999-1111-7aaa-bbbb-ccccddddeeee.jsonl"),
-    }]);
-
-    // Now simulate /last command
-    gateway.lastChatId = 789;
-    gateway.handlePiEvent({
-      type: "response",
-      command: "get_last_assistant_text",
-      success: true,
-      data: { text: "The auth bug is fixed." },
-    });
-
+    expect(piCommands.map((c) => c.type)).toEqual(["switch_session", "get_state", "get_last_assistant_text"]);
     expect(messages.length).toBe(1);
     expect(messages[0]!.chatId).toBe(789);
     expect(messages[0]!.text).toBe("The auth bug is fixed\\.");
@@ -2184,7 +1958,7 @@ describe("Integration: /resume then /last", () => {
 describe("Gateway.handlePhotoMessage", () => {
   it("rejects unauthorized user", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 999, api });
+    const gateway = newGateway({ allowedUserId: 999, api });
     gateway.downloadFile = async () => Buffer.from("fake");
     const ctx = mockPhotoContext({ from: { id: 111 } });
     let replied = false;
@@ -2197,11 +1971,10 @@ describe("Gateway.handlePhotoMessage", () => {
   });
 
   it("starts a session with caption and image when pi is idle", async () => {
-    const piCommands: object[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("test");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
 
     const ctx = mockPhotoContext();
     await gateway.handlePhotoMessage(ctx, api);
@@ -2219,11 +1992,10 @@ describe("Gateway.handlePhotoMessage", () => {
   });
 
   it("uses empty message when photo has no caption", async () => {
-    const piCommands: object[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("img");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
 
     const ctx = mockPhotoContext({ msg: { caption: undefined, photo: mockPhotoContext().msg.photo } });
     await gateway.handlePhotoMessage(ctx, api);
@@ -2235,9 +2007,8 @@ describe("Gateway.handlePhotoMessage", () => {
   it("picks the largest photo by file_size", async () => {
     const downloadedIds: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async (fileId) => { downloadedIds.push(fileId); return Buffer.from("img"); };
-    gateway.sendPi = () => {};
 
     const ctx = mockPhotoContext({
       msg: {
@@ -2257,7 +2028,7 @@ describe("Gateway.handlePhotoMessage", () => {
   it("replies 'Failed to download photo.' on download error", async () => {
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => { throw new Error("network down"); };
 
     const ctx = mockPhotoContext();
@@ -2271,11 +2042,10 @@ describe("Gateway.handlePhotoMessage", () => {
 
   it("steers message with images when pi is busy", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     gateway.downloadFile = async () => Buffer.from("busy-img");
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
     const reactions: string[] = [];
     const ctx = mockPhotoContext();
     ctx.react = async (emoji) => { reactions.push(emoji); };
@@ -2284,7 +2054,6 @@ describe("Gateway.handlePhotoMessage", () => {
 
     expect(piCommands).toEqual([{
       type: "steer",
-      id: expect.any(String),
       message: "what's in this photo",
       images: [{
         type: "image",
@@ -2296,12 +2065,11 @@ describe("Gateway.handlePhotoMessage", () => {
   });
 
   it("replies with saved filename after photo download", async () => {
-    const piCommands: object[] = [];
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("photo-data");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
     gateway.saveUpload = async () => "/uploads/1747380800000.jpeg";
 
     const ctx = mockPhotoContext();
@@ -2316,9 +2084,8 @@ describe("Gateway.handlePhotoMessage", () => {
   it("replies 'Not saved' when UPLOAD_DIR is not set (saveUpload returns null)", async () => {
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("photo-data");
-    gateway.sendPi = () => {};
     gateway.saveUpload = async () => null;
 
     const ctx = mockPhotoContext();
@@ -2331,13 +2098,12 @@ describe("Gateway.handlePhotoMessage", () => {
   });
 
   it("startPiSession includes images in RPC command", async () => {
-    const piCommands: object[] = [];
     const api: TelegramApi = {
       ...mockApi(),
       sendMessage: async () => ({ message_id: 11 }),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway);
 
     await gateway.startPiSession(123, "look", api, [
       { type: "image", data: "bb==", mimeType: "image/png" },
@@ -2351,13 +2117,12 @@ describe("Gateway.handlePhotoMessage", () => {
   });
 
   it("startPiSession omits images when empty array", async () => {
-    const piCommands: object[] = [];
     const api: TelegramApi = {
       ...mockApi(),
       sendMessage: async () => ({ message_id: 12 }),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway);
 
     await gateway.startPiSession(123, "hello", api, []);
 
@@ -2368,13 +2133,12 @@ describe("Gateway.handlePhotoMessage", () => {
   });
 
   it("startPiSession omits images when undefined", async () => {
-    const piCommands: object[] = [];
     const api: TelegramApi = {
       ...mockApi(),
       sendMessage: async () => ({ message_id: 13 }),
     };
-    const gateway = new Gateway({ allowedUserId: 1, api });
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 1, api });
+    const piCommands = fakePi(gateway);
 
     await gateway.startPiSession(123, "hello", api);
 
@@ -2388,7 +2152,7 @@ describe("Gateway.handlePhotoMessage", () => {
 describe("Gateway.handleDocumentMessage", () => {
   it("rejects unauthorized user", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 999, api });
+    const gateway = newGateway({ allowedUserId: 999, api });
     gateway.downloadFile = async () => Buffer.from("fake");
     const ctx = mockDocumentContext({ from: { id: 111 } });
     let replied = false;
@@ -2402,8 +2166,7 @@ describe("Gateway.handleDocumentMessage", () => {
 
   it("ignores document with missing file_id", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.sendPi = () => {};
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
 
     const ctx = mockDocumentContext({ msg: { document: undefined } });
     await gateway.handleDocumentMessage(ctx, api);
@@ -2412,9 +2175,10 @@ describe("Gateway.handleDocumentMessage", () => {
   });
 
   it("replies with error when UPLOAD_DIR is not set", async () => {
+    delete process.env.UPLOAD_DIR;
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
 
     const ctx = mockDocumentContext();
     ctx.reply = async (text) => { replies.push(text); };
@@ -2427,8 +2191,7 @@ describe("Gateway.handleDocumentMessage", () => {
 
   it("does NOT start Pi session (documents are never auto-passed)", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.sendPi = () => {};
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("doc-data");
 
     // Even with a valid document, UPLOAD_DIR is null → error reply, no Pi interaction
@@ -2472,9 +2235,8 @@ describe("extFromMime", () => {
 describe("Gateway.injectPrompt", () => {
   it("starts a session when pi is idle", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     // pi idle, currentChatId is set
     gateway.currentChatId = 456;
@@ -2487,9 +2249,8 @@ describe("Gateway.injectPrompt", () => {
 
   it("falls back to allowedUserId when currentChatId is 0", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     // currentChatId defaults to 0
     gateway.injectPrompt("prompt text", "test.txt");
@@ -2500,9 +2261,8 @@ describe("Gateway.injectPrompt", () => {
 
   it("steers the message when pi is busy", () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     gateway.piStreaming = true;
     gateway.currentChatId = 789;
@@ -2511,7 +2271,6 @@ describe("Gateway.injectPrompt", () => {
 
     expect(piCommands).toEqual([{
       type: "steer",
-      id: expect.any(String),
       message: "steered prompt",
     }]);
   });
@@ -2520,9 +2279,8 @@ describe("Gateway.injectPrompt", () => {
 describe("Gateway.handleTextMessage (! commands)", () => {
   it("sends bash RPC for !command", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     const ctx = mockContext({ msg: { text: "!ls" } });
     await gateway.handleTextMessage(ctx, api);
@@ -2534,9 +2292,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 
   it("trims whitespace from !command", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     const ctx = mockContext({ msg: { text: "!  echo hello  " } });
     await gateway.handleTextMessage(ctx, api);
@@ -2547,9 +2304,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 
   it("preserves full command string after ! prefix", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     const ctx = mockContext({ msg: { text: "!echo hello world with spaces" } });
     await gateway.handleTextMessage(ctx, api);
@@ -2559,9 +2315,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 
   it("replies with usage when ! has no command", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     const replies: Array<{ text: string; other?: Record<string, unknown> }> = [];
     const ctx = mockContext({
@@ -2581,9 +2336,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 
   it("replies with usage when ! is only whitespace", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
+    const piCommands = fakePi(gateway);
 
     const replies: Array<{ text: string }> = [];
     const ctx = mockContext({
@@ -2601,9 +2355,8 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 
   it("rejects !command from unauthorized user", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 999, api });
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const gateway = newGateway({ allowedUserId: 999, api });
+    const piCommands = fakePi(gateway);
 
     const ctx = mockContext({ from: { id: 111 }, msg: { text: "!rm -rf /" } });
     await gateway.handleTextMessage(ctx, api);
@@ -2614,11 +2367,10 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 
   it("!command bypasses busy path (always fires immediately)", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true; // simulate busy
 
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
 
     const ctx = mockContext({ msg: { text: "!df -h" } });
     await gateway.handleTextMessage(ctx, api);
@@ -2631,7 +2383,7 @@ describe("Gateway.handleTextMessage (! commands)", () => {
 describe("Gateway.handleVoiceMessage", () => {
   it("rejects unauthorized user", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 999, api });
+    const gateway = newGateway({ allowedUserId: 999, api });
     gateway.downloadFile = async () => Buffer.from("fake");
     const ctx = mockVoiceContext({ from: { id: 111 } });
     let replied = false;
@@ -2647,7 +2399,7 @@ describe("Gateway.handleVoiceMessage", () => {
     delete process.env.UPLOAD_DIR;
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("fake");
 
     const ctx = mockVoiceContext();
@@ -2661,8 +2413,7 @@ describe("Gateway.handleVoiceMessage", () => {
 
   it("ignores voice message with missing file_id", async () => {
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
-    gateway.sendPi = () => {};
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
 
     const ctx = mockVoiceContext({ msg: { voice: undefined } });
     await gateway.handleVoiceMessage(ctx, api);
@@ -2674,7 +2425,7 @@ describe("Gateway.handleVoiceMessage", () => {
     process.env.UPLOAD_DIR = "/uploads";
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => { throw new Error("network down"); };
 
     const ctx = mockVoiceContext();
@@ -2690,7 +2441,7 @@ describe("Gateway.handleVoiceMessage", () => {
     process.env.UPLOAD_DIR = "/uploads";
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("ogg-data");
     gateway.saveUpload = async () => null;
 
@@ -2705,12 +2456,11 @@ describe("Gateway.handleVoiceMessage", () => {
 
   it("starts a session with voice prompt when pi is idle", async () => {
     process.env.UPLOAD_DIR = "/uploads";
-    const piCommands: object[] = [];
     const replies: string[] = [];
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.downloadFile = async () => Buffer.from("ogg-data");
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
     gateway.saveUpload = async () => "/uploads/voice_1234567890.ogg";
 
     const ctx = mockVoiceContext();
@@ -2729,12 +2479,11 @@ describe("Gateway.handleVoiceMessage", () => {
   it("steers voice prompt and reacts when pi is busy", async () => {
     process.env.UPLOAD_DIR = "/uploads";
     const api = mockApi();
-    const gateway = new Gateway({ allowedUserId: 8476228873, api });
+    const gateway = newGateway({ allowedUserId: 8476228873, api });
     gateway.piStreaming = true;
     gateway.downloadFile = async () => Buffer.from("busy-ogg");
     gateway.saveUpload = async () => "/uploads/voice_busy.ogg";
-    const piCommands: Record<string, unknown>[] = [];
-    gateway.sendPi = (cmd) => { piCommands.push(cmd); };
+    const piCommands = fakePi(gateway);
 
     const reactions: string[] = [];
     const ctx = mockVoiceContext();
@@ -2744,7 +2493,6 @@ describe("Gateway.handleVoiceMessage", () => {
 
     expect(piCommands).toEqual([{
       type: "steer",
-      id: expect.any(String),
       message: "voice message from user: /uploads/voice_busy.ogg",
     }]);
     expect(reactions).toEqual(["👀"]);
