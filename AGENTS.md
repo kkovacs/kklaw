@@ -9,7 +9,7 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API utils, file download, safe editor), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL + request/response correlation), `sessions.ts` (session scanning), `inject.ts` (file-based prompt injection). `extensions/undo.ts` is a standalone Pi extension (`/undo [n]` via `ctx.navigateTree()`), loaded with `-e`; kklaw has no undo-specific code and `tsconfig.json` excludes `extensions/` (Pi's types aren't a dependency).
+Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API utils, file download, safe editor), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL + request/response correlation), `sessions.ts` (session scanning), `inject.ts` (file-based prompt injection).
 
 ## Pipeline
 
@@ -202,7 +202,7 @@ Bun auto-loads `.env` from the project root (the directory containing `package.j
 All args except kklaw's own `-v`/`-vv`/`-vvv` are passed to pi (`spawnPi()`); a `--` is optional and dropped (bun strips a `--` right after the script name anyway):
 
 ```bash
-bun run index.ts -v --provider opencode-go --model minimax-m2.5 --no-session -e extensions/undo.ts
+bun run index.ts -v --provider opencode-go --model minimax-m2.5 --no-session -e ~/.kkrc/pi-ext/undo.ts
 ```
 
 ## Commands
