@@ -9,17 +9,18 @@ Telegram user ──HTTP──→ grammy bot ──JSONL stdin──→ pi --mod
                  ←──         bot ←──JSONL stdout──  pi
 ```
 
-Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API utils, file download, safe editor), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL + request/response correlation), `sessions.ts` (session scanning), `inject.ts` (file-based prompt injection).
+Source files: `index.ts` (bot wiring + `Gateway` class), `telegram.ts` (API utils, file download, safe editor), `relay.ts` (debounced streaming + formatting), `pi-client.ts` (subprocess + JSONL + request/response correlation), `sessions.ts` (session scanning), `inject.ts` (file-based prompt injection). `extensions/undo.ts` is a standalone Pi extension (`/undo [n]` via `ctx.navigateTree()`), loaded with `-e`; kklaw has no undo-specific code and `tsconfig.json` excludes `extensions/` (Pi's types aren't a dependency).
 
 ## Pipeline
 
 1. Telegram text/photo/document/voice → auth check (`TELEGRAM_ALLOWED_USER_ID`). Known slash commands intercepted by `bot.command()`; unknown ones pass through as prompts. `!command` triggers a `bash` RPC (not a Pi LLM prompt). Photos: largest by `file_size` picked, downloaded via Telegram `getFile`, base64-encoded as `image/jpeg`, and if `UPLOAD_DIR` is set also saved to disk with a timestamp-based name (e.g. `1747380800000.jpeg`) — a `📎 Saved: <code>&lt;full_path&gt;</code> — Sending to Pi…` reply confirms the save; otherwise `📤 Not saved (UPLOAD_DIR not set), directly sending to Pi…` is shown. Photos are auto-passed to Pi as `ImageContent[]` with the caption as prompt text. Documents: downloaded and saved to `UPLOAD_DIR` with original `file_name` preserved — the user gets a `📎 Saved: <code>&lt;full_path&gt;</code> — Pi can access it but was not notified.` reply. Documents are **never** auto-passed to the LLM; the user must send a follow-up text prompt referencing the saved file for Pi to read it. If `UPLOAD_DIR` is not set, document uploads are rejected with `❌ UPLOAD_DIR is not set. Cannot save document.`. Voice messages: downloaded and saved to `UPLOAD_DIR` as `voice_<timestamp>.ogg`; Pi is then prompted with `voice message from user: <full_path>` so an audio-capable model can read the file itself. If `UPLOAD_DIR` is not set, voice uploads are rejected with `❌ UPLOAD_DIR is not set. Cannot save voice message.`.
-2. If pi idle → `Gateway.startPiSession()` sends `{"type":"prompt"}` (with optional `images` for photos/documents) via `requestPi()` and awaits its preflight response. `disposition: "handled"` (an extension command such as `/undo` consumed it) or a failed response means no run started and no `agent_settled` will follow, so `piStreaming` is cleared right there (failures are shown as `❌ <error>`). While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`/`agent_settled`).
+2. If pi idle → `Gateway.startPiSession()` sends `{"type":"prompt"}` (with optional `images` for photos/documents) via `requestPi()` and awaits its preflight response. `disposition: "handled"` (an extension command such as `/undo` consumed it) or a failed response means no run started and no `agent_settled` will follow, so `piStreaming` is cleared right there (failures are shown as `❌ <error>`). Exception: when `startPiSession()` is called while a run is already going (the `steerPi()` fallback), it leaves that run's state (`piStreaming`, `currentChatId`, placeholder, tool messages) alone — the run's own `agent_settled` clears it. While working, "typing..." sent reactively on each incoming event (with cooldown, excluding `response`/`agent_end`/`agent_settled`).
 3. Pi's `message_start` (assistant role) → creates a new Telegram placeholder message + per-message `Relay`. `message_update`/`text_delta` → current relay accumulates → `createSafeEditor.edit()` debounced. `thinking_delta` is dropped.
 4. `message_end` → finalizes current relay. If no content produced (tool-call-only message), the placeholder is deleted. If an error arrived with no content, the placeholder is edited to show the error.
 5. On `agent_end` → safety-net finalization of any remaining relay, error surfacing fallback (guarded by `piErrorSent` flag), tool summary. `agent_end` closes only one low-level agent run — retries/recovery/steering may continue, so `piStreaming` stays true.
 6. On `agent_settled` (pi will not continue automatically) → `piStreaming = false`, reset run state. This is the true idle signal.
-7. If pi busy → message forwarded to the current run via the `steer` RPC (`Gateway.steerPi()`, with `images` when present), `👀` reaction added via `ctx.react()`. Unless the steer response says `disposition: "queued"`, the message is resent as a fresh `prompt`. Pi delivers it after the current turn's tool calls; the steering queue lives in the pi process (survives gateway restarts).
+7. If pi busy → message forwarded to the current run via the `steer` RPC (`Gateway.steerPi()`, with `images` when present), `👀` reaction added via `ctx.react()`. Unless the steer response says `disposition: "queued"`, the message is resent as a fresh `prompt`. Pi refuses to queue extension commands (`Extension command "/x" cannot be queued`), so mid-run they go this way and pi runs them immediately (e.g. `/undo` then notifies that it can't navigate while streaming).
+8. `extension_ui_request` with `method: "notify"` → sent to `currentChatId` (or `allowedUserId`) as `ℹ️`/`⚠️`/`❌ <message>` by `notifyType`. Other extension UI methods are ignored. Pi delivers it after the current turn's tool calls; the steering queue lives in the pi process (survives gateway restarts).
 
 ### Telegram allowed reaction emoji
 
@@ -139,7 +140,7 @@ Every `get_state` response (`Gateway.cmdState()`, also run at startup and after 
 - **Reactive typing indicator**: `sendChatAction("typing")` fires on each incoming work event (with cooldown). No `setInterval`. Events like `response`/`agent_end`/`agent_settled` don't trigger it.
 - **Idle detection**: `piStreaming` is cleared only on `agent_settled`, not `agent_end` — post-agent_end events (retries, compaction, steered turns) still route to the active chat.
 - **`/think` mirrors `/model`**: same no-args list + inline-keyboard / arg-set split.
-- **Mid-run forwarding via steer**: `steerPi()` awaits the steer response and resends the message as a fresh `prompt` run when the steer is rejected (e.g. sent right at `agent_end` — the agent_end→agent_settled race) or consumed with `disposition: "handled"` without starting work. `disposition: "queued"` needs no action. XXX: a message steered while a prompt is still in preflight stays queued in pi if that prompt then turns out `handled`.
+- **Mid-run forwarding via steer**: `steerPi()` awaits the steer response and resends the message as a fresh `prompt` run when the steer is rejected (e.g. sent right at `agent_end` — the agent_end→agent_settled race, or an extension command pi won't queue) or consumed with `disposition: "handled"` without starting work. `disposition: "queued"` needs no action. XXX: a message steered while a prompt is still in preflight stays queued in pi if that prompt then turns out `handled`.
   Queued steers/follow-ups live in the pi process; `/abort` drains them with `clear_queue` sent *before* `abort` (abort alone continues the run with queued messages still in the session).
 - **createSafeEditor** handles three error classes: `MESSAGE_TOO_LONG` (rollback + chunk-send), parse errors during streaming (skip, retry later), parse errors on final (plain text fallback).
 - **MarkdownV2 escape**: relaxed escape — `*` `_` `` ` `` pass through for Pi's formatting; all other reserved chars (`[`, `(`, `~`, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`, `\`) escaped.
@@ -154,7 +155,7 @@ Every `get_state` response (`Gateway.cmdState()`, also run at startup and after 
 
 ## Known gaps (marked `XXX` in code)
 
-- Extension UI dialogs (`select`, `confirm`, `input`, `editor`) not forwarded to user
+- Extension UI dialogs (`select`, `confirm`, `input`, `editor`) and `setStatus`/`setWidget`/`setTitle`/`set_editor_text` not forwarded to user (only `notify` is)
 - Unauthorized users are silently ignored (no rejection reply)
 - `/resume` shows limited results; no pagination
 - Photo media group debouncing not implemented
@@ -179,6 +180,7 @@ abort:       { type: "abort" }
 abort_bash:  { type: "abort_bash" }
 clear_queue: { type: "clear_queue" } → data `{ steering: string[], followUp: string[] }`
 response:    { type: "response", id?: string, command?: string, success: bool, error?: string, data?: unknown }
+extension_ui_request (notify): { type: "extension_ui_request", id: string, method: "notify", message: string, notifyType?: "info" | "warning" | "error" }
 ImageContent: `{ type: "image", data: string (base64), mimeType: string }`
 ModelInfo (subset used): `{ id, name, provider, contextWindow, input[], cost: { input, output } }`
 ```
@@ -197,10 +199,10 @@ Bun auto-loads `.env` from the project root (the directory containing `package.j
 | `INJECT_DIR` | directory watched for prompt files | `~/.pi/agent/injects/` |
 | `UPLOAD_DIR` | directory to save incoming photos/documents | — (disabled if unset) |
 
-Extra Pi flags passed after `--`:
+All args except kklaw's own `-v`/`-vv`/`-vvv` are passed to pi (`spawnPi()`); a `--` is optional and dropped (bun strips a `--` right after the script name anyway):
 
 ```bash
-bun run index.ts -- --provider opencode-go --model minimax-m2.5 --no-session
+bun run index.ts -v --provider opencode-go --model minimax-m2.5 --no-session -e extensions/undo.ts
 ```
 
 ## Commands

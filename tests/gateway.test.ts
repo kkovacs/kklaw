@@ -233,6 +233,22 @@ describe("Gateway.steerPi", () => {
     expect(piCommands.length).toBe(2);
     expect(piCommands[1]).toEqual({ type: "prompt", message: "steered text" });
   });
+
+  it("keeps the current run streaming when the prompt fallback is handled", async () => {
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    // pi refuses to queue extension commands; run via prompt they are handled at once
+    const piCommands = fakePi(gateway, (cmd) =>
+      cmd.type === "steer" ? { success: false, error: "Extension command \"/ext\" cannot be queued." }
+      : cmd.type === "prompt" ? { data: { disposition: "handled" } } : undefined);
+    gateway.piStreaming = true;
+    gateway.currentChatId = 123;
+
+    await gateway.steerPi(123, "/ext");
+
+    expect(piCommands.map((c) => c.type)).toEqual(["steer", "prompt"]);
+    expect(gateway.piStreaming).toBe(true); // the run's agent_settled will clear it
+    expect(gateway.currentChatId).toBe(123);
+  });
 });
 
 describe("Gateway.startPiSession prompt disposition", () => {
@@ -259,6 +275,22 @@ describe("Gateway.startPiSession prompt disposition", () => {
     expect(gateway.piStreaming).toBe(false);
     expect(gateway.currentChatId).toBe(0);
     expect(sent).toEqual([]);
+  });
+
+  it("leaves a running run's state alone when called while busy and no new run starts", async () => {
+    const gateway = newGateway({ allowedUserId: 1, api: mockApi() });
+    fakePi(gateway, () => ({ data: { disposition: "handled" } }));
+    gateway.piStreaming = true;
+    gateway.currentChatId = 123;
+    gateway.currentPlaceholderMessageId = 55;
+    gateway.toolMessages.set("call1", { msgId: 56, startText: "🔧 bash" });
+
+    await gateway.startPiSession(123, "/ext");
+
+    expect(gateway.piStreaming).toBe(true);
+    expect(gateway.currentChatId).toBe(123);
+    expect(gateway.currentPlaceholderMessageId).toBe(55);
+    expect(gateway.toolMessages.size).toBe(1);
   });
 
   it("goes idle and reports the error when pi rejects the prompt", async () => {
@@ -333,6 +365,53 @@ describe("Gateway.sendTyping", () => {
 });
 
 describe("Gateway.handlePiEvent", () => {
+  describe("extension_ui_request", () => {
+    // Raw pi JSON, typed as handlePiEvent's (narrower) PiEvent
+    const uiEvent = (e: Record<string, unknown>) => e as unknown as Parameters<Gateway["handlePiEvent"]>[0];
+
+    function notifyGateway() {
+      const sent: { chatId: number | string; text: string }[] = [];
+      const gateway = newGateway({
+        allowedUserId: 1,
+        api: { ...mockApi(), sendMessage: async (chatId, text) => { sent.push({ chatId, text }); return { message_id: 1 }; } },
+      });
+      return { gateway, sent };
+    }
+
+    it("forwards notify to the current chat with an icon per notifyType", async () => {
+      const { gateway, sent } = notifyGateway();
+      gateway.currentChatId = 123;
+
+      await gateway.handlePiEvent(uiEvent({ type: "extension_ui_request", id: "u1", method: "notify", message: "plain" }));
+      await gateway.handlePiEvent(uiEvent({ type: "extension_ui_request", id: "u2", method: "notify", message: "careful", notifyType: "warning" }));
+      await gateway.handlePiEvent(uiEvent({ type: "extension_ui_request", id: "u3", method: "notify", message: "broke", notifyType: "error" }));
+
+      expect(sent).toEqual([
+        { chatId: 123, text: "ℹ️ plain" },
+        { chatId: 123, text: "⚠️ careful" },
+        { chatId: 123, text: "❌ broke" },
+      ]);
+    });
+
+    it("forwards notify to the allowed user when no chat is active", async () => {
+      const { gateway, sent } = notifyGateway();
+
+      await gateway.handlePiEvent(uiEvent({ type: "extension_ui_request", id: "u1", method: "notify", message: "hi" }));
+
+      expect(sent).toEqual([{ chatId: 1, text: "ℹ️ hi" }]);
+    });
+
+    it("ignores other extension UI methods", async () => {
+      const { gateway, sent } = notifyGateway();
+      gateway.currentChatId = 123;
+
+      await gateway.handlePiEvent(uiEvent({ type: "extension_ui_request", id: "u1", method: "setStatus", statusKey: "k", statusText: "x" }));
+      await gateway.handlePiEvent(uiEvent({ type: "extension_ui_request", id: "u2", method: "select", title: "Pick", options: ["a"] }));
+
+      expect(sent).toEqual([]);
+    });
+  });
+
   it("streams text_delta through relay", async () => {
     const api = mockApi();
     const edits: string[] = [];
